@@ -150,6 +150,17 @@ void platform_override_streamid(int sid, struct device *dev)
 		if (sid != conf->sid)
 			continue;
 #if KERNEL_VERSION(5, 10, 0) <= LINUX_VERSION_CODE
+		/*
+		 * Tegra186 SID tables predate the interconnect client_id
+		 * filtering and leave client_id as zero.  Preserve the old
+		 * SID-based override behaviour for those entries.
+		 */
+		if (!conf->client_id) {
+			for (j = 0; j < conf->noids; j++)
+				__mc_override_sid(sid, conf->oid[j], conf->ord);
+			continue;
+		}
+
 		while (!of_parse_phandle_with_args(dev->of_node, "interconnects",
 						   "#interconnect-cells", index, &args)) {
 			if (args.args_count != 0) {

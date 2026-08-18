@@ -63,6 +63,7 @@
 #include "nvhost_scale.h"
 #include "chip_support.h"
 #include "t210/t210.h"
+#include "t186/t186.h"
 
 #include "t194/t194.h"
 #include "t23x/t23x.h"
@@ -999,6 +1000,10 @@ static int nvhost_alloc_resources(struct nvhost_master *host)
 }
 
 static struct of_device_id tegra_host1x_of_match[] = {
+	{
+		.compatible = "nvidia,tegra186-host1x",
+		.data = (struct nvhost_device_data *)&t18_host1x_info,
+	},
 	{ .compatible = "nvidia,tegra210-host1x",
 		.data = (struct nvhost_device_data *)&t21_host1x_info },
 	{ .name = "host1x",

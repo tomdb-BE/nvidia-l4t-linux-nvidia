@@ -90,6 +90,7 @@ static struct cpuidle_driver t18x_denver_idle_driver;
 static struct cpuidle_driver t18x_a57_idle_driver;
 static int crossover_init(void);
 static void program_cluster_state(void *data);
+static u32 t18x_make_power_state(u32 state);
 static u32 tsc_per_sec, nsec_per_tsc_tick;
 static u32 tsc_per_usec;
 
@@ -119,12 +120,10 @@ static void tegra186_denver_enter_c7(int index)
 
 	/* Block all interrupts in the cpu core */
 	local_irq_disable();
-	local_fiq_disable();
 	cpu_pm_enter();  /* power down notifier */
 	per_cpu(sleep_time, cpu) = drv->states[index].target_residency;
-	arm_cpuidle_suspend(TEGRA186_DENVER_CPUIDLE_C7);
+	psci_cpu_suspend_enter(t18x_make_power_state(0x40000007));
 	cpu_pm_exit();
-	local_fiq_enable();
 	local_irq_enable();
 }
 
@@ -135,7 +134,7 @@ static void tegra186_a57_enter_c7(int index)
 
 	cpu_pm_enter();  /* power down notifier */
 	per_cpu(sleep_time, cpu) = drv->states[index].target_residency;
-	arm_cpuidle_suspend(TEGRA186_A57_CPUIDLE_C7);
+	psci_cpu_suspend_enter(t18x_make_power_state(0x40000007));
 	cpu_pm_exit();
 }
 
@@ -338,7 +337,6 @@ static int denver_idle_write(void *data, u64 val)
         preempt_disable();
         tick_nohz_idle_enter();
         stop_critical_timings();
-        local_fiq_disable();
         local_irq_disable();
 
         interval = ktime_set(0, (NSEC_PER_USEC * timer_interval_us));
@@ -363,7 +361,6 @@ static int denver_idle_write(void *data, u64 val)
 			ktime_to_ns(sleep), ktime_to_ns(time));
 
         local_irq_enable();
-        local_fiq_enable();
         start_critical_timings();
         tick_nohz_idle_exit();
         preempt_enable_no_resched();
@@ -388,7 +385,6 @@ static int a57_idle_write(void *data, u64 val)
 
         tick_nohz_idle_enter();
         stop_critical_timings();
-        local_fiq_disable();
         local_irq_disable();
 
         interval = ktime_set(0, (NSEC_PER_USEC * timer_interval_us));
@@ -410,7 +406,6 @@ static int a57_idle_write(void *data, u64 val)
         pr_info("idle: %lld, exit latency: %lld\n",
 			ktime_to_ns(sleep), ktime_to_ns(time));
         local_irq_enable();
-        local_fiq_enable();
         start_critical_timings();
         tick_nohz_idle_exit();
         preempt_enable_no_resched();
@@ -567,17 +562,11 @@ static int cpuidle_debugfs_init(void)
 	if (!cpuidle_debugfs_denver)
 		goto err_out;
 
-	dfs_file = debugfs_create_u64("forced_idle_state", 0644,
+	debugfs_create_u64("forced_idle_state", 0644,
 		cpuidle_debugfs_denver, &denver_idle_state);
 
-	if (!dfs_file)
-		goto err_out;
-
-	dfs_file = debugfs_create_u64("forced_cluster_idle_state", 0644,
+	debugfs_create_u64("forced_cluster_idle_state", 0644,
 		cpuidle_debugfs_denver, &denver_cluster_idle_state);
-
-	if (!dfs_file)
-		goto err_out;
 
 	dfs_file = debugfs_create_file("forced_idle_duration_us", 0200,
 		cpuidle_debugfs_denver, NULL, &duration_us_denver_fops);
@@ -614,22 +603,16 @@ static int cpuidle_debugfs_init(void)
 	if (!cpuidle_debugfs_a57)
 		goto err_out;
 
-	dfs_file = debugfs_create_u64("forced_idle_state", 0644,
+	debugfs_create_u64("forced_idle_state", 0644,
 		cpuidle_debugfs_a57, &a57_idle_state);
-
-	if (!dfs_file)
-		goto err_out;
 
 	dfs_file = debugfs_create_file("testmode", 0200,
 		cpuidle_debugfs_a57, NULL, &a57_testmode_fops);
 	if (!dfs_file)
 		goto err_out;
 
-	dfs_file = debugfs_create_u64("forced_cluster_idle_state", 0644,
+	debugfs_create_u64("forced_cluster_idle_state", 0644,
 		cpuidle_debugfs_a57, &a57_cluster_idle_state);
-
-	if (!dfs_file)
-		goto err_out;
 
 	dfs_file = debugfs_create_file("forced_idle_duration_us", 0200,
 		cpuidle_debugfs_a57, NULL, &duration_us_a57_fops);
@@ -837,12 +820,6 @@ static int __init tegra18x_cpuidle_probe(struct platform_device *pdev)
 			cpumask_set_cpu(cpu_number, &a57_cpumask);
 		else
 			cpumask_set_cpu(cpu_number, &denver_cpumask);
-
-		err = arm_cpuidle_init(cpu_number);
-		if (err) {
-			pr_err("cpuidle: failed to register cpuidle driver\n");
-			return err;
-		}
 	}
 
 	crossover_init();

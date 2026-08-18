@@ -217,7 +217,8 @@ static int __init nvpmodel_clk_cap_init(void)
 		goto exit;
 	}
 
-	if (tegra_get_chip_id() == TEGRA194) {
+	if (tegra_get_chip_id() == TEGRA186 ||
+	    tegra_get_chip_id() == TEGRA194) {
 #if IS_ENABLED(CONFIG_TEGRA_BWMGR)
 		bwmgr_handle =
 			tegra_bwmgr_register(TEGRA_BWMGR_CLIENT_NVPMODEL);

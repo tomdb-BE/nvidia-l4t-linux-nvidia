@@ -3,7 +3,7 @@
 #
 config CPU_IDLE_TEGRA18X
 	bool "CPU Idle Driver for NVIDIA Tegra18x SoCs"
-	depends on ARCH_TEGRA_18x_SOC
+	depends on ARCH_TEGRA_18x_SOC || ARCH_TEGRA_186_SOC
 	default y
 	select CPU_IDLE_MULTIPLE_DRIVERS
 	select DT_IDLE_STATES

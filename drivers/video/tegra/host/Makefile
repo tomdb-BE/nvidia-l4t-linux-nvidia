@@ -35,6 +35,7 @@ nvhost-y += \
 	riscv/riscv.o \
 	t210/t210.o \
 	t194/t194.o \
+	t186/t186.o \
 	t23x/t23x.o
 
 nvhost-$(CONFIG_TEGRA_T239_GRHOST) += \
