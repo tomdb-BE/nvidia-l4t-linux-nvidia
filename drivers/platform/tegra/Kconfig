@@ -39,7 +39,7 @@ config TEGRA_A57_SERR
 
 config TEGRA_18X_SERROR
         tristate "Tegra18 SError handler"
-        depends on ARCH_TEGRA_18x_SOC
+        depends on ARCH_TEGRA_18x_SOC || ARCH_TEGRA_186_SOC
         select DENVER_MCA
 	select TEGRA_ARI_MCA
 	select TEGRA_BRIDGE_MCA
