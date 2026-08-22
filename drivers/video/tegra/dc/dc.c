@@ -3286,7 +3286,8 @@ unsigned long tegra_dc_poll_register(struct tegra_dc *dc, u32 reg, u32 mask,
 	if ((reg_val & mask) == exp_val)
 		return 0;       /* success */
 	dev_err(&dc->ndev->dev,
-		"dc_poll_register 0x%x: timeout\n", reg);
+		"dc_poll_register 0x%x: timeout val=0x%08x mask=0x%08x exp=0x%08x masked=0x%08x\n",
+		reg, reg_val, mask, exp_val, reg_val & mask);
 	return jiffies - timeout_jf + 1;
 }
 

@@ -880,6 +880,8 @@ struct tegra_dc_sor_data *tegra_dc_sor_init(struct tegra_dc *dc,
 		goto err_allocate;
 	}
 
+	sor->dc = dc;
+
 	if (of_property_read_bool(sor_np, "nvidia,sor-audio-not-supported"))
 		sor->audio_support = false;
 	else
@@ -1054,7 +1056,7 @@ bypass_pads:
 	 */
 	sor->genpd_dev = dev_pm_domain_attach_by_name(&dc->ndev->dev, "sor");
 
-	if (IS_ERR(sor->genpd_dev)) {
+	if (IS_ERR_OR_NULL(sor->genpd_dev)) {
 		dev_err(&dc->ndev->dev,
 			"Failed to attach power domain to sor.%d\n",
 			sor->ctrl_num);
@@ -1064,7 +1066,7 @@ bypass_pads:
 #else
 	sor->powergate_id = tegra_pd_get_powergate_id(tegra_sor_pd);
 #endif
-	sor->dc = dc;
+	
 	sor->np = sor_np;
 	sor->sor_clk = sor_clk;
 	sor->safe_clk = safe_clk;
@@ -1145,7 +1147,6 @@ void tegra_dc_sor_destroy(struct tegra_dc_sor_data *sor)
 
 	iounmap(sor->base);
 
-	devm_pinctrl_put(sor->pinctrl_sor);
 	sor->dpd_enable = NULL;
 	sor->dpd_disable = NULL;
 	if ((!(sor->irq < 0)) && sor->audio_support)

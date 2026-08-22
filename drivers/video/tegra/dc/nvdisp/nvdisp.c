@@ -2228,7 +2228,8 @@ int tegra_nvdisp_head_enable(struct tegra_dc *dc)
 {
 	int i;
 	int res;
-	int pclk = 0;
+	int pclk = 0, ret = 0;
+	struct clk *parent_clk = NULL;
 
 	if (WARN_ON(!dc || !dc->out || !dc->out_ops))
 		return false;
@@ -2242,7 +2243,11 @@ int tegra_nvdisp_head_enable(struct tegra_dc *dc)
 	/* turn on hub clock and init bw */
 	if (!hubclk_already_on) {
 		tegra_nvdisp_init_bandwidth(dc);
-		tegra_disp_clk_prepare_enable(hubclk);
+		ret = tegra_disp_clk_prepare_enable(hubclk);
+		dev_info(&dc->ndev->dev,
+			 "CLKDBG hub enable ret=%d rate=%lu enabled=%d\n",
+			 ret, clk_get_rate(hubclk),
+			 __clk_is_enabled(hubclk));
 		hubclk_already_on = true;
 	}
 	mutex_unlock(&tegra_nvdisp_lock);
@@ -2252,6 +2257,50 @@ int tegra_nvdisp_head_enable(struct tegra_dc *dc)
 	/* Enable OR -- need to enable the connection first */
 	if (dc->out->enable)
 		dc->out->enable(&dc->ndev->dev);
+
+	/*
+	 * Tegra186 requires the NvDisplay head clock to be parented to the
+	 * output-selected PLL and initialized to the current pixel clock
+	 * before enabling the head.  This was present in NVIDIA 4.9 but
+	 * disappeared from the 5.10 implementation.
+	 */
+	if (dc->out->type == TEGRA_DC_OUT_DSI) {
+		parent_clk = tegra_disp_clk_get(&dc->ndev->dev,
+					       "pll_d_out1");
+	} else {
+		parent_clk = tegra_disp_clk_get(&dc->ndev->dev,
+					       dc->out->parent_clk);
+		dev_info(&dc->ndev->dev,
+			 "parent clock for DC%d: %s\n",
+			 dc->ctrl_num, dc->out->parent_clk);
+	}
+
+	if (IS_ERR_OR_NULL(parent_clk)) {
+		dev_err(&dc->ndev->dev,
+			"failed to get DC%d parent clock %s\n",
+			dc->ctrl_num,
+			dc->out->parent_clk ?: "<null>");
+		return -ENOENT;
+	}
+
+	ret = clk_set_parent(dc->clk, parent_clk);
+	if (ret) {
+		dev_err(&dc->ndev->dev,
+			"failed to set DC%d parent clock: %d\n",
+			dc->ctrl_num, ret);
+		return ret;
+	}
+
+	if (!dc->initialized) {
+		ret = clk_set_rate(dc->clk, dc->mode.pclk);
+		if (ret) {
+			dev_err(&dc->ndev->dev,
+				"failed to set DC%d rate to %lu: %d\n",
+				dc->ctrl_num,
+				(unsigned long)dc->mode.pclk, ret);
+			return ret;
+		}
+	}
 
 	if (dc->out_ops->setup_clk)
 		pclk = dc->out_ops->setup_clk(dc, dc->clk);
@@ -2265,11 +2314,28 @@ int tegra_nvdisp_head_enable(struct tegra_dc *dc)
 
 	pr_debug(" dc clk %ld\n", clk_get_rate(dc->clk));
 
-	tegra_nvdisp_set_compclk(dc);
+	ret = tegra_nvdisp_set_compclk(dc);
+	dev_info(&dc->ndev->dev,
+		 "CLKDBG comp ret=%d rate=%lu enabled=%d dc=%lu dc_enabled=%d\n",
+		 ret,
+		 clk_get_rate(compclk),
+		 __clk_is_enabled(compclk),
+		 clk_get_rate(dc->clk),
+		 __clk_is_enabled(dc->clk));
+
 	tegra_dc_get(dc);
 
 	/* Deassert the dc reset */
+	dev_info(&dc->ndev->dev,
+		 "RESETDBG head%d before=%d\n",
+		 dc->ctrl_num, reset_control_status(dc->rst));
+
 	res = reset_control_deassert(dc->rst);
+
+	dev_info(&dc->ndev->dev,
+		 "RESETDBG head%d deassert ret=%d after=%d\n",
+		 dc->ctrl_num, res, reset_control_status(dc->rst));
+
 	if (res) {
 		dev_err(&dc->ndev->dev, "Unable to deassert dc %d\n",
 				dc->ctrl_num);
@@ -2277,6 +2343,17 @@ int tegra_nvdisp_head_enable(struct tegra_dc *dc)
 	}
 
 	tegra_nvdisp_wgrp_reset_deassert(dc);
+
+	dev_info(&dc->ndev->dev,
+		 "RESETDBG misc=%d wgrp0=%d wgrp1=%d wgrp2=%d "
+		 "wgrp3=%d wgrp4=%d wgrp5=%d\n",
+		 reset_control_status(nvdisp_common_rst[0]),
+		 reset_control_status(nvdisp_common_rst[1]),
+		 reset_control_status(nvdisp_common_rst[2]),
+		 reset_control_status(nvdisp_common_rst[3]),
+		 reset_control_status(nvdisp_common_rst[4]),
+		 reset_control_status(nvdisp_common_rst[5]),
+		 reset_control_status(nvdisp_common_rst[6]));
 
 	/* Mask interrupts during init */
 	tegra_dc_writel(dc, 0, DC_CMD_INT_MASK);
@@ -2289,6 +2366,13 @@ int tegra_nvdisp_head_enable(struct tegra_dc *dc)
 	 * separate powergate/rst handling during init.
 	 */
 	tegra_nvdisp_init_common_imp_reg_caps(dc);
+
+	dev_info(&dc->ndev->dev,
+		 "DCDBG clk=%lu cmd=0x%08lx access=0x%08lx state=0x%08lx\n",
+		 clk_get_rate(dc->clk),
+		 tegra_dc_readl(dc, DC_CMD_DISPLAY_COMMAND),
+		 tegra_dc_readl(dc, DC_CMD_STATE_ACCESS),
+		 tegra_dc_readl(dc, DC_CMD_STATE_CONTROL));
 
 	res = tegra_nvdisp_head_init(dc);
 	res |= tegra_nvdisp_postcomp_init(dc);
@@ -2555,11 +2639,25 @@ static inline int tegra_nvdisp_handle_pd_enable(struct tegra_dc_pd_info *pd,
 		int i;
 
 #if KERNEL_VERSION(5, 4, 0) <= LINUX_VERSION_CODE
+		pr_info("nvdisp-pd: before %s head=%u status=%d enabled=%d usage=%d\n",
+			pd->pd_name, pd->head_owner,
+			pd->genpd_dev->power.runtime_status,
+			pm_runtime_enabled(pd->genpd_dev),
+			atomic_read(&pd->genpd_dev->power.usage_count));
+
 		ret = pm_runtime_get_sync(pd->genpd_dev);
-		if (IS_ERR(ERR_PTR(ret))) {
-			pr_err("%s: Failed to unpowergate %s domain for Head%u\n",
-				__func__, pd->pd_name, pd->head_owner);
-			return -EINVAL;
+
+		pr_info("nvdisp-pd: after  %s head=%u ret=%d status=%d enabled=%d usage=%d\n",
+			pd->pd_name, pd->head_owner, ret,
+			pd->genpd_dev->power.runtime_status,
+			pm_runtime_enabled(pd->genpd_dev),
+			atomic_read(&pd->genpd_dev->power.usage_count));
+
+		if (ret < 0) {
+			pr_err("%s: Failed to unpowergate %s domain for Head%u: %d\n",
+				__func__, pd->pd_name, pd->head_owner, ret);
+			pm_runtime_put_noidle(pd->genpd_dev);
+			return ret;
 		}
 #else
 		ret = tegra_unpowergate_partition(pd->pg_id);
@@ -2572,6 +2670,12 @@ static inline int tegra_nvdisp_handle_pd_enable(struct tegra_dc_pd_info *pd,
 
 		for (i = 0; i < nclks; i++)
 			tegra_disp_clk_prepare_enable(domain_clks[i].clk);
+
+		for (i = 0; i < nclks; i++)
+			pr_info("PDCLKDBG %s[%d] %s rate=%lu enabled=%d\n",
+				pd->pd_name, i, domain_clks[i].name,
+				clk_get_rate(domain_clks[i].clk),
+				__clk_is_enabled(domain_clks[i].clk));
 
 		pr_info("%s: Unpowergated Head%u pd\n", __func__,
 			pd->head_owner);

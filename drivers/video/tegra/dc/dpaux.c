@@ -850,11 +850,12 @@ struct tegra_dc_dpaux_data *tegra_dpaux_init_data(struct tegra_dc *dc,
 	dpaux->genpd_dev = dev_pm_domain_attach_by_name(
 					&dc->ndev->dev, "dpaux");
 
-	if (IS_ERR(dpaux->genpd_dev)) {
+	if (IS_ERR_OR_NULL(dpaux->genpd_dev)) {
 		dev_err(&dc->ndev->dev,
 			"failed to attach dpaux pm-domain dpaux.%d\n",
 			dpaux->ctrl_num);
-		err = -EINVAL;
+		err = IS_ERR(dpaux->genpd_dev) ?
+			PTR_ERR(dpaux->genpd_dev) : -ENODEV;
 		goto err_put_rst;
 	}
 #else
