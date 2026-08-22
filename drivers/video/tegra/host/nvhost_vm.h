@@ -53,6 +53,24 @@ struct nvhost_vm {
 };
 
 /**
+ * nvhost_vm_release_firmware_area - release area from firmware pool
+ * @pdev: host1x client device
+ * @size: size of the allocation
+ * @dma_addr: address returned by nvhost_vm_allocate_firmware_area()
+ */
+void nvhost_vm_release_firmware_area(struct platform_device *pdev,
+				     size_t size, dma_addr_t dma_addr);
+
+/**
+ * nvhost_vm_allocate_firmware_area - allocate area from firmware pool
+ * @pdev: host1x client device
+ * @size: size of the allocation
+ * @dma_addr: returned IOVA
+ */
+void *nvhost_vm_allocate_firmware_area(struct platform_device *pdev,
+				       size_t size, dma_addr_t *dma_addr);
+
+/**
  * nvhost_vm_init - initialize vm
  *	@pdev: Pointer to host1x platform device
  *

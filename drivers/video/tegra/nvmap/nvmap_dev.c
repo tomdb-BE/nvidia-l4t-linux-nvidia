@@ -430,6 +430,13 @@ static long nvmap_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		break;
 #endif
 
+	case NVMAP_IOC_WRITE_LEGACY:
+	case NVMAP_IOC_READ_LEGACY:
+		err = nvmap_ioctl_rw_handle(filp,
+			cmd == NVMAP_IOC_READ_LEGACY, uarg,
+			sizeof(struct nvmap_rw_handle_legacy));
+		break;
+
 	case NVMAP_IOC_WRITE:
 	case NVMAP_IOC_READ:
 		err = nvmap_ioctl_rw_handle(filp, cmd == NVMAP_IOC_READ, uarg,

@@ -49,6 +49,7 @@
 
 #include "host1x/host1x04_hardware.h" /* for nvhost opcodes*/
 #include "t210/t210.h"
+#include "t186/t186.h"
 
 #include "t194/t194.h"
 #include "t23x/t23x.h"
@@ -206,6 +207,37 @@ err:
 	return ret;
 }
 
+static int flcn_setup_ucode_fce(struct platform_device *dev,
+				struct flcn *v, struct ucode_v1_flcn *ucode)
+{
+	struct nvhost_device_data *pdata = platform_get_drvdata(dev);
+
+	if (ucode->bin_header->fce_bin_header_offset == 0xa5a5a5a5)
+		return 0;
+
+	ucode->fce_header = (struct ucode_fce_header_v1_flcn *)
+		((u8 *)v->mapped + ucode->bin_header->fce_bin_header_offset);
+
+	if (pdata->isolate_contexts) {
+		v->fce_mapped = nvhost_vm_allocate_firmware_area(dev,
+			ucode->fce_header->fce_ucode_size, &v->fce_dma_addr);
+		if (!v->fce_mapped)
+			return -ENOMEM;
+
+		memcpy(v->fce_mapped,
+		       (u8 *)v->mapped + ucode->bin_header->fce_bin_data_offset,
+		       ucode->fce_header->fce_ucode_size);
+	} else {
+		v->fce_dma_addr = v->dma_addr +
+			ucode->bin_header->fce_bin_data_offset;
+	}
+
+	v->fce.size = ucode->fce_header->fce_ucode_size;
+	v->fce.data_offset = ucode->bin_header->fce_bin_data_offset;
+
+	return 0;
+}
+
 int flcn_setup_ucode_image(struct platform_device *dev,
 			   struct flcn *v,
 			   const struct firmware *ucode_fw,
@@ -310,6 +342,7 @@ static int flcn_read_ucode(struct platform_device *dev,
 		    const char *fw_name,
 		    struct flcn *v)
 {
+	struct nvhost_device_data *pdata = platform_get_drvdata(dev);
 	const struct firmware *ucode_fw;
 	struct ucode_v1_flcn ucode;
 	unsigned long attrs;
@@ -345,6 +378,15 @@ static int flcn_read_ucode(struct platform_device *dev,
 	if (err) {
 		dev_err(&dev->dev, "failed to parse firmware image\n");
 		goto clean_up;
+	}
+
+	if (tegra_get_chip_id() == TEGRA186 &&
+	    pdata->class == NV_GRAPHICS_VIC_CLASS_ID) {
+		err = flcn_setup_ucode_fce(dev, v, &ucode);
+		if (err) {
+			dev_err(&dev->dev, "failed to parse FCE image\n");
+			goto clean_up;
+		}
 	}
 
 	v->valid = true;
@@ -680,6 +722,8 @@ int nvhost_vic_finalize_poweron(struct platform_device *pdev)
 int nvhost_vic_init_context(struct platform_device *pdev,
 			    struct nvhost_cdma *cdma)
 {
+	struct flcn *v = get_flcn(pdev);
+
 	/* load application id */
 	nvhost_cdma_push(cdma,
 		nvhost_opcode_setclass(NV_GRAPHICS_VIC_CLASS_ID,
@@ -688,6 +732,28 @@ int nvhost_vic_init_context(struct platform_device *pdev,
 	nvhost_cdma_push(cdma,
 		nvhost_opcode_setclass(NV_GRAPHICS_VIC_CLASS_ID,
 				       FLCN_UCLASS_METHOD_DATA, 1), 1);
+
+	if (tegra_get_chip_id() != TEGRA186)
+		return 0;
+
+	if (!v || !v->fce.size || !v->fce_dma_addr)
+		return -EINVAL;
+
+	/* T186 VIC4 requires its FCE image in every isolated context. */
+	nvhost_cdma_push(cdma,
+		nvhost_opcode_setclass(NV_GRAPHICS_VIC_CLASS_ID,
+			FLCN_UCLASS_METHOD_OFFSET, 1),
+		NVA0B6_VIDEO_COMPOSITOR_SET_FCE_UCODE_SIZE >> 2);
+	nvhost_cdma_push(cdma,
+		nvhost_opcode_setclass(NV_GRAPHICS_VIC_CLASS_ID,
+			FLCN_UCLASS_METHOD_DATA, 1), v->fce.size);
+	nvhost_cdma_push(cdma,
+		nvhost_opcode_setclass(NV_GRAPHICS_VIC_CLASS_ID,
+			FLCN_UCLASS_METHOD_OFFSET, 1),
+		NVA0B6_VIDEO_COMPOSITOR_SET_FCE_UCODE_OFFSET >> 2);
+	nvhost_cdma_push(cdma,
+		nvhost_opcode_setclass(NV_GRAPHICS_VIC_CLASS_ID,
+			FLCN_UCLASS_METHOD_DATA, 1), v->fce_dma_addr >> 8);
 
 	return 0;
 }
@@ -734,6 +800,8 @@ int nvhost_vic_aggregate_constraints(struct platform_device *dev,
 
 static struct of_device_id tegra_flcn_of_match[] = {
 #if IS_ENABLED(CONFIG_TEGRA_GRHOST_VIC)
+	{ .compatible = "nvidia,tegra186-vic",
+		.data = (struct nvhost_device_data *)&t18_vic_info },
 	{ .compatible = "nvidia,tegra210-vic",
 		.data = (struct nvhost_device_data *)&t21_vic_info },
 	{ .compatible = "nvidia,tegra194-vic",
@@ -742,6 +810,8 @@ static struct of_device_id tegra_flcn_of_match[] = {
 		.data = (struct nvhost_device_data *)&t23x_vic_info },
 #endif
 #if IS_ENABLED(CONFIG_TEGRA_GRHOST_NVENC)
+	{ .compatible = "nvidia,tegra186-nvenc",
+		.data = (struct nvhost_device_data *)&t18_msenc_info },
 	{ .compatible = "nvidia,tegra210-nvenc",
 		.data = (struct nvhost_device_data *)&t21_msenc_info },
 	{ .compatible = "nvidia,tegra194-nvenc",

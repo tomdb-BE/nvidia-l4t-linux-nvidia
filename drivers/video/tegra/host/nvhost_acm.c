@@ -507,8 +507,17 @@ int nvhost_module_get_rate(struct platform_device *dev, unsigned long *rate,
 
 	index = array_index_nospec(index, NVHOST_MODULE_MAX_CLOCKS);
 
-	if (nvhost_is_bw_clk(pdata, index))
-		return -EINVAL;
+	if (nvhost_is_bw_clk(pdata, index)) {
+		/*
+		 * R32 userspace queries the EMC pseudo-clock through the legacy
+		 * GET_CLK_RATE ioctl.  On 4.9 this returned the BWMGR EMC rate.
+		 * 5.10 represents this clock as an interconnect bandwidth vote, so
+		 * there is no struct clk to query.  Return the configured floor
+		 * instead of failing the otherwise-compatible ioctl.
+		 */
+		*rate = pdata->clocks[index].default_rate;
+		return 0;
+	}
 
 	if (pdata->clk[index]) {
 		/* Terrible and racy, but so is the whole concept of

@@ -1808,7 +1808,13 @@ int nvadsp_os_start(void)
 		cold_start = 0;
 	}
 
-	if (drv_data->chip_data->hwmb.hwmbox1_reg != 0) {
+	/*
+	 * The chip-id mailbox handshake belongs to the newer T18x-derived
+	 * firmware ABI which also advertises the shared-memory mailbox.
+	 * Original Tegra186 firmware uses fixed ACSR and has no such handshake.
+	 */
+	if (drv_data->chip_data->adsp_shared_mem_hwmbox != 0 &&
+	    drv_data->chip_data->hwmb.hwmbox1_reg != 0) {
 		chip_id = tegra_get_chip_id();
 		/* Write chip id info to HWMBOX1 to enable ast config
 		 * later for t186/t196

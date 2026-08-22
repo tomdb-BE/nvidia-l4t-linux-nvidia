@@ -37,6 +37,7 @@
 #include <linux/anon_inodes.h>
 #include <linux/kref.h>
 #include <linux/nospec.h>
+#include <linux/sync_file.h>
 
 #include "dev.h"
 #include <trace/events/nvhost.h>
@@ -299,7 +300,7 @@ static int nvhost_ioctl_ctrl_sync_fence_set_name(
 	struct nvhost_ctrl_userctx *ctx,
 	struct nvhost_ctrl_sync_fence_name_args *args)
 {
-#if IS_ENABLED(CONFIG_TEGRA_GRHOST_SYNC) && IS_ENABLED(CONFIG_SYNC)
+#if IS_ENABLED(CONFIG_TEGRA_GRHOST_SYNC)
 	int err;
 	char name[32];
 	const char __user *args_name =
@@ -317,7 +318,11 @@ static int nvhost_ioctl_ctrl_sync_fence_set_name(
 		name[0] = '\0';
 	}
 
+#if IS_ENABLED(CONFIG_SYNC)
 	err = nvhost_sync_fence_set_name(args->fence_fd, name);
+#else
+	err = sync_file_set_name(args->fence_fd, name);
+#endif
 	return err;
 #else
 	nvhost_err(&ctx->dev->dev->dev, "operation not supported");

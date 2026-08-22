@@ -460,6 +460,8 @@ int nvmap_ioctl_rw_handle(struct file *filp, int is_read, void __user *arg,
 {
 	struct nvmap_client *client = filp->private_data;
 	struct nvmap_rw_handle __user *uarg = arg;
+	struct nvmap_rw_handle_legacy __user *uarg_legacy = arg;
+	struct nvmap_rw_handle_legacy op_legacy;
 	struct nvmap_rw_handle op;
 #ifdef CONFIG_COMPAT
 	struct nvmap_rw_handle_32 __user *uarg32 = arg;
@@ -486,15 +488,27 @@ int nvmap_ioctl_rw_handle(struct file *filp, int is_read, void __user *arg,
 	} else
 #endif
 	{
-		if (copy_from_user(&op, arg, sizeof(op)))
-			return -EFAULT;
-		addr = op.addr;
-		handle = op.handle;
-		offset = op.offset;
-		elem_size = op.elem_size;
-		hmem_stride = op.hmem_stride;
-		user_stride = op.user_stride;
-		count = op.count;
+		if (op_size == sizeof(op_legacy)) {
+			if (copy_from_user(&op_legacy, arg, sizeof(op_legacy)))
+				return -EFAULT;
+			addr = op_legacy.addr;
+			handle = op_legacy.handle;
+			offset = op_legacy.offset;
+			elem_size = op_legacy.elem_size;
+			hmem_stride = op_legacy.hmem_stride;
+			user_stride = op_legacy.user_stride;
+			count = op_legacy.count;
+		} else {
+			if (copy_from_user(&op, arg, sizeof(op)))
+				return -EFAULT;
+			addr = op.addr;
+			handle = op.handle;
+			offset = op.offset;
+			elem_size = op.elem_size;
+			hmem_stride = op.hmem_stride;
+			user_stride = op.user_stride;
+			count = op.count;
+		}
 	}
 
 	if (!addr || !count || !elem_size)
@@ -544,7 +558,10 @@ int nvmap_ioctl_rw_handle(struct file *filp, int is_read, void __user *arg,
 		__put_user(copied, &uarg32->count);
 	else
 #endif
-		__put_user(copied, &uarg->count);
+		if (op_size == sizeof(op_legacy))
+			__put_user(copied, &uarg_legacy->count);
+		else
+			__put_user(copied, &uarg->count);
 
 	nvmap_handle_put(h);
 

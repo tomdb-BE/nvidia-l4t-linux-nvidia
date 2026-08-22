@@ -562,6 +562,43 @@ static struct nvadsp_chipdata tegra210_adsp_chipdata = {
 	.amc_err_war = true,
 };
 
+/*
+ * Tegra186 uses the original T18x ADSP mailbox ABI.  In particular,
+ * the secure-loaded firmware expects ACSR at the fixed 0x5fd00000 IOVA
+ * from nvidia,adsp_mem and does not use HWMBOX3/HWMBOX5 to discover
+ * shared memory/configuration.  Later SoCs using the tegra18x driver
+ * ABI added those mailboxes and EMPTY_INT_IE.
+ */
+static struct nvadsp_chipdata tegra186_adsp_chipdata = {
+	.hwmb = {
+		.reg_idx = AHSP,
+		.hwmbox0_reg = 0x00000,
+		.hwmbox1_reg = 0x08000,
+		.hwmbox2_reg = 0x10000,
+		.hwmbox3_reg = 0x18000,
+		.hwmbox4_reg = 0x20000,
+		.hwmbox5_reg = 0x28000,
+		.hwmbox6_reg = 0x30000,
+		.hwmbox7_reg = 0x38000,
+		.empty_int_ie = 0,
+	},
+	.adsp_state_hwmbox = 0x30000,
+	.adsp_thread_hwmbox = 0x20000,
+	.adsp_irq_hwmbox = 0x38000,
+	.adsp_shared_mem_hwmbox = 0,
+	.adsp_os_config_hwmbox = 0,
+	.reset_init = nvadsp_reset_t18x_init,
+	.os_init = nvadsp_os_t18x_init,
+#ifdef CONFIG_PM
+	.pm_init = nvadsp_pm_t18x_init,
+#endif
+	.wdt_irq = INT_T18x_ATKE_WDT_IRQ,
+	.start_irq = INT_T18x_AGIC_START,
+	.end_irq = INT_T18x_AGIC_END,
+
+	.amc_err_war = true,
+};
+
 static struct nvadsp_chipdata tegrat18x_adsp_chipdata = {
 	.hwmb = {
 		.reg_idx = AHSP,
@@ -597,6 +634,9 @@ static const struct of_device_id nvadsp_of_match[] = {
 	{
 		.compatible = "nvidia,tegra210-adsp",
 		.data = &tegra210_adsp_chipdata,
+	}, {
+		.compatible = "nvidia,tegra186-adsp",
+		.data = &tegra186_adsp_chipdata,
 	}, {
 		.compatible = "nvidia,tegra18x-adsp",
 		.data = &tegrat18x_adsp_chipdata,

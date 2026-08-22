@@ -18,17 +18,93 @@
 
 #include <trace/events/nvhost.h>
 #include <linux/platform_device.h>
+#include <linux/bitmap.h>
 #include <linux/list.h>
 #include <linux/slab.h>
 #include <linux/dma-buf.h>
 #include <linux/iommu.h>
+#include <linux/sizes.h>
 
 #include "chip_support.h"
 #include "nvhost_vm.h"
 #include "dev.h"
+#include "iommu_context_dev.h"
+#include "platform.h"
+
+void nvhost_vm_release_firmware_area(struct platform_device *pdev,
+				     size_t size, dma_addr_t dma_addr)
+{
+	struct nvhost_master *host = nvhost_get_host(pdev);
+	struct nvhost_vm_firmware_area *firmware_area = &host->firmware_area;
+	int region = (dma_addr - firmware_area->dma_addr) / SZ_4K;
+	int order = get_order(size);
+
+	if (!host->info.firmware_area_size)
+		return;
+
+	mutex_lock(&firmware_area->mutex);
+	bitmap_release_region(firmware_area->bitmap, region, order);
+	mutex_unlock(&firmware_area->mutex);
+}
+
+void *nvhost_vm_allocate_firmware_area(struct platform_device *pdev,
+				       size_t size, dma_addr_t *dma_addr)
+{
+	struct nvhost_master *host = nvhost_get_host(pdev);
+	struct nvhost_vm_firmware_area *firmware_area = &host->firmware_area;
+	int order = get_order(size);
+	int region;
+
+	if (!host->info.firmware_area_size)
+		return NULL;
+
+	mutex_lock(&firmware_area->mutex);
+	region = bitmap_find_free_region(firmware_area->bitmap,
+					 firmware_area->bitmap_size_bits, order);
+	mutex_unlock(&firmware_area->mutex);
+	if (region < 0)
+		return NULL;
+
+	*dma_addr = firmware_area->dma_addr + region * SZ_4K;
+	return firmware_area->vaddr + region * SZ_4K;
+}
 
 int nvhost_vm_init(struct platform_device *pdev)
 {
+	struct nvhost_master *host = nvhost_get_host(pdev);
+	struct nvhost_vm_firmware_area *firmware_area = &host->firmware_area;
+	int err;
+
+	if (tegra_get_chip_id() != TEGRA186 || !host->info.firmware_area_size)
+		return 0;
+
+	mutex_init(&firmware_area->mutex);
+	firmware_area->bitmap_size_bits =
+		DIV_ROUND_UP(host->info.firmware_area_size, SZ_4K);
+	firmware_area->bitmap_size_bytes =
+		DIV_ROUND_UP(firmware_area->bitmap_size_bits, 8);
+	firmware_area->bitmap = devm_kzalloc(&pdev->dev,
+		firmware_area->bitmap_size_bytes, GFP_KERNEL);
+	if (!firmware_area->bitmap)
+		return -ENOMEM;
+
+	firmware_area->vaddr = dma_alloc_attrs(&pdev->dev,
+		host->info.firmware_area_size, &firmware_area->dma_addr,
+		GFP_KERNEL, DMA_ATTR_READ_ONLY);
+	if (!firmware_area->vaddr)
+		return -ENOMEM;
+
+	err = iommu_context_dev_map_static(firmware_area->vaddr,
+		firmware_area->dma_addr, host->info.firmware_area_size);
+	if (err) {
+		dma_free_attrs(&pdev->dev, host->info.firmware_area_size,
+			       firmware_area->vaddr, firmware_area->dma_addr,
+			       DMA_ATTR_READ_ONLY);
+		firmware_area->vaddr = NULL;
+		firmware_area->dma_addr = 0;
+		return err;
+	}
+
 	return 0;
 }
 

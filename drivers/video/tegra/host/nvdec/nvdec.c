@@ -49,6 +49,7 @@
 #include "nvhost_scale.h"
 #include "chip_support.h"
 #include "t210/t210.h"
+#include "t186/t186.h"
 #include "class_ids_t194.h"
 #include "platform.h"
 
@@ -456,6 +457,8 @@ static int nvhost_nvdec_init_sw(struct platform_device *pdev)
 }
 
 static struct of_device_id tegra_nvdec_of_match[] = {
+	{ .compatible = "nvidia,tegra186-nvdec",
+		.data = (struct nvhost_device_data *)&t18_nvdec_info },
 	{ .compatible = "nvidia,tegra210-nvdec",
 		.data = (struct nvhost_device_data *)&t21_nvdec_info },
 	{ .compatible = "nvidia,tegra194-nvdec",

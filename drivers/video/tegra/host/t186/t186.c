@@ -7,14 +7,24 @@
 
 #include <linux/slab.h>
 #include <linux/io.h>
+#include <linux/sizes.h>
 #include <linux/version.h>
+#include <linux/platform/tegra/emc_bwmgr.h>
+#include <soc/tegra/kfuse.h>
 
 #include "platform.h"
 #include "dev.h"
 #include "chip_support.h"
 #include "t186.h"
 #include "hardware_t186.h"
+#include "streamid_regs.c"
 #include "host1x/host1x.h"
+#include "class_ids.h"
+#include "flcn/flcn.h"
+#include "nvdec/nvdec.h"
+
+#define HOST_EMC_FLOOR 204000000
+#define HOST_NVDEC_EMC_FLOOR 102000000
 
 static struct host1x_device_info host1x04_info = {
 	.nb_channels = T186_NVHOST_NUMCHANNELS,
@@ -29,6 +39,7 @@ static struct host1x_device_info host1x04_info = {
 	.nb_syncpt_irqs = 1,
 	.syncpt_policy = SYNCPT_PER_CHANNEL_INSTANCE,
 	.channel_policy = MAP_CHANNEL_ON_SUBMIT,
+	.firmware_area_size = SZ_1M,
 	.resources = {
 		"vm",
 		"hypervisor",
@@ -49,6 +60,132 @@ struct nvhost_device_data t18_host1x_info = {
 	.isolate_contexts = true,
 };
 
+
+/*
+ * T186 media engines use the legacy nvhost userspace ABI.  Keep these
+ * descriptors intentionally small: clock/power/reset handling and Falcon
+ * firmware boot are required for functional decode/encode/VIC operation;
+ * devfreq/ACTMON tuning can be layered on once basic engine bring-up is
+ * validated on 5.10.
+ */
+static int nvhost_flcn_t186_finalize_poweron(struct platform_device *dev)
+{
+	flcn_enable_thi_sec(dev);
+	return nvhost_flcn_finalize_poweron(dev);
+}
+
+static int nvhost_nvdec_t186_finalize_poweron(struct platform_device *dev)
+{
+	int err;
+
+	err = tegra_kfuse_enable_sensing();
+	if (err)
+		return err;
+
+	flcn_enable_thi_sec(dev);
+	err = nvhost_nvdec_finalize_poweron(dev);
+	tegra_kfuse_disable_sensing();
+
+	return err;
+}
+
+#if IS_ENABLED(CONFIG_TEGRA_GRHOST_NVENC)
+struct nvhost_device_data t18_msenc_info = {
+	.version = NVHOST_ENCODE_FLCN_VER(6, 1),
+	.devfs_name = "msenc",
+	.class = NV_VIDEO_ENCODE_NVENC_CLASS_ID,
+	.modulemutexes = { NV_HOST1X_MLOCK_ID_NVENC },
+	.can_powergate = true,
+	.autosuspend_delay = 500,
+	.clocks = {
+		{ "nvenc", UINT_MAX, 0 },
+		{ "emc", HOST_EMC_FLOOR,
+		  NVHOST_MODULE_ID_EXTERNAL_MEMORY_CONTROLLER,
+		  TEGRA_SET_EMC_SHARED_BW },
+	},
+	.poweron_reset = true,
+	.finalize_poweron = nvhost_flcn_t186_finalize_poweron,
+	.moduleid = NVHOST_MODULE_MSENC,
+	.num_channels = 1,
+	.firmware_name = "nvhost_nvenc061.fw",
+	.serialize = true,
+	.push_work_done = true,
+	.resource_policy = RESOURCE_PER_CHANNEL_INSTANCE,
+	.vm_regs = { { 0x30, true }, { 0x34, false } },
+	.transcfg_addr = 0x1844,
+	.transcfg_val = 0x20,
+	.bwmgr_client_id = TEGRA_BWMGR_CLIENT_MSENC,
+	.isolate_contexts = true,
+	.mlock_timeout_factor = 3,
+};
+#endif
+
+#if IS_ENABLED(CONFIG_TEGRA_GRHOST_NVDEC)
+struct nvhost_device_data t18_nvdec_info = {
+	.version = NVHOST_ENCODE_NVDEC_VER(3, 0),
+	.devfs_name = "nvdec",
+	.modulemutexes = { NV_HOST1X_MLOCK_ID_NVDEC },
+	.class = NV_NVDEC_CLASS_ID,
+	.can_powergate = true,
+	.autosuspend_delay = 500,
+	.clocks = {
+		{ "nvdec", UINT_MAX, 0 },
+		{ "emc", HOST_NVDEC_EMC_FLOOR,
+		  NVHOST_MODULE_ID_EXTERNAL_MEMORY_CONTROLLER,
+		  TEGRA_SET_EMC_FLOOR },
+	},
+	.poweron_reset = true,
+	.finalize_poweron = nvhost_nvdec_t186_finalize_poweron,
+	.moduleid = NVHOST_MODULE_NVDEC,
+	.ctrl_ops = &tegra_nvdec_ctrl_ops,
+	.num_channels = 1,
+	.serialize = true,
+	.push_work_done = true,
+	.resource_policy = RESOURCE_PER_CHANNEL_INSTANCE,
+	.vm_regs = { { 0x30, true }, { 0x34, false } },
+	.transcfg_addr = 0x2c44,
+	.transcfg_val = 0x20,
+	.bwmgr_client_id = TEGRA_BWMGR_CLIENT_NVDEC,
+	.isolate_contexts = true,
+	.mlock_timeout_factor = 3,
+};
+#endif
+
+#if IS_ENABLED(CONFIG_TEGRA_GRHOST_VIC)
+struct nvhost_device_data t18_vic_info = {
+	.num_channels = 1,
+	.devfs_name = "vic",
+	.clocks = {
+		{ "vic", UINT_MAX, 0 },
+		{ "emc", HOST_EMC_FLOOR,
+		  NVHOST_MODULE_ID_EXTERNAL_MEMORY_CONTROLLER,
+		  TEGRA_SET_EMC_SHARED_BW },
+	},
+	.version = NVHOST_ENCODE_FLCN_VER(4, 0),
+	.can_powergate = true,
+	.autosuspend_delay = 500,
+	.moduleid = NVHOST_MODULE_VIC,
+	.poweron_reset = true,
+	.modulemutexes = { NV_HOST1X_MLOCK_ID_VIC },
+	.class = NV_GRAPHICS_VIC_CLASS_ID,
+	.finalize_poweron = nvhost_flcn_t186_finalize_poweron,
+	.prepare_poweroff = nvhost_flcn_prepare_poweroff,
+	.flcn_isr = nvhost_flcn_common_isr,
+	.init_class_context = nvhost_vic_init_context,
+	.firmware_name = "vic04_ucode.bin",
+	.serialize = true,
+	.push_work_done = true,
+	.resource_policy = RESOURCE_PER_CHANNEL_INSTANCE,
+	.vm_regs = { { 0x30, true }, { 0x34, false } },
+	.transcfg_addr = 0x2044,
+	.transcfg_val = 0x20,
+	.bwmgr_client_id = TEGRA_BWMGR_CLIENT_VIC,
+	.isolate_contexts = true,
+	.mlock_timeout_factor = 3,
+	.module_irq = 1,
+};
+#endif
+
 /*
  * The 5.10 nvhost core uses the T194-style host1x implementation.
  * Build it against the T186 host1x5 register definitions above.
@@ -60,6 +197,29 @@ struct nvhost_device_data t18_host1x_info = {
 #include "host1x/host1x_intr_t194.c"
 #include "host1x/host1x_debug_t194.c"
 #include "host1x/host1x_vm_t194.c"
+
+/*
+ * Program the T186 HOST1X_THOST_COMMON_*_STRMID offset/limit table.
+ *
+ * T186 engines expose their StreamID registers at engine-local offsets
+ * (for VIC/NVENC/NVDEC, 0x30..0x34).  Host1x SETSTREAMID accesses those
+ * registers through this mapping table.  NVIDIA's 4.9 T186 support
+ * programmed the same table as part of host1x bring-up.
+ */
+static void t186_init_map_regs(struct platform_device *pdev)
+{
+	struct nvhost_streamid_mapping *map_regs =
+		t18x_host1x_streamid_mapping;
+
+	while (map_regs->host1x_offset) {
+		host1x_hypervisor_writel(pdev, map_regs->host1x_offset,
+					 map_regs->client_offset);
+		host1x_hypervisor_writel(pdev,
+					 map_regs->host1x_offset + sizeof(u32),
+					 map_regs->client_limit);
+		map_regs++;
+	}
+}
 
 static void t186_set_nvhost_chanops(struct nvhost_channel *ch)
 {
@@ -99,6 +259,8 @@ int nvhost_init_t186_support(struct nvhost_master *host,
 	op->syncpt = host1x_syncpt_ops;
 	op->intr = host1x_intr_ops;
 	op->vm = host1x_vm_ops;
+
+	op->nvhost_dev.load_map_regs = t186_init_map_regs;
 
 	op->syncpt.reset = t194_syncpt_reset;
 	op->syncpt.mark_used = t194_syncpt_mark_used;

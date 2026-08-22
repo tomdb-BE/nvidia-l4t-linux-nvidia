@@ -24,6 +24,8 @@
 #include "dev.h"
 #include "debug.h"
 #include "chip_support.h"
+#include "iommu_context_dev.h"
+#include "platform.h"
 #include <asm/cacheflush.h>
 #include <nvhost_vm.h>
 
@@ -65,6 +67,29 @@ int nvhost_push_buffer_alloc(struct push_buffer *pb)
 		nvhost_err(NULL, "failed to allocate pushbuffer");
 		pb->mapped = NULL;
 		return -ENOMEM;
+	}
+
+	/*
+	 * T186 changes the Host1x memory StreamID while submitting isolated
+	 * engine jobs. The CDMA pushbuffer must therefore remain reachable at
+	 * the same IOVA in every T186 context-bank address space. This was done
+	 * by nvhost_vm_map_static() in the 4.9 T186 implementation.
+	 */
+	if (tegra_get_chip_id() == TEGRA186) {
+		int err = iommu_context_dev_map_static(pb->mapped, pb->dma_addr,
+				PUSH_BUFFER_SIZE + 4);
+
+		if (err) {
+			nvhost_err(NULL,
+				   "failed to map T186 pushbuffer to contexts: %d",
+				   err);
+			dma_free_coherent(&cdma_to_dev(cdma)->dev->dev,
+					  PUSH_BUFFER_SIZE + 4, pb->mapped,
+					  pb->dma_addr);
+			pb->mapped = NULL;
+			pb->dma_addr = 0;
+			return err;
+		}
 	}
 
 	return 0;

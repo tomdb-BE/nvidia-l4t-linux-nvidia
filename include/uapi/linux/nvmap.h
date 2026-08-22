@@ -126,6 +126,23 @@ struct nvmap_rw_handle {
 };
 
 #ifdef __KERNEL__
+/*
+ * Legacy native ABI used by L4T R32 userspace.
+ *
+ * On arm64, the pre-5.10 native nvmap_rw_handle used a 64-bit user
+ * pointer followed by 32-bit transfer parameters, giving a 32-byte
+ * ioctl payload.
+ */
+struct nvmap_rw_handle_legacy {
+	__u64 addr;		/* user pointer */
+	__u32 handle;		/* nvmap handle */
+	__u32 offset;		/* offset into hmem */
+	__u32 elem_size;	/* individual atom size */
+	__u32 hmem_stride;	/* delta in bytes between atoms in hmem */
+	__u32 user_stride;	/* delta in bytes between atoms in user */
+	__u32 count;		/* number of atoms to copy */
+};
+
 #ifdef CONFIG_COMPAT
 struct nvmap_rw_handle_32 {
 	__u32 addr;		/* user pointer */
@@ -281,6 +298,10 @@ struct nvmap_duplicate_handle {
 #define NVMAP_IOC_WRITE      _IOW(NVMAP_IOC_MAGIC, 6, struct nvmap_rw_handle)
 #define NVMAP_IOC_READ       _IOW(NVMAP_IOC_MAGIC, 7, struct nvmap_rw_handle)
 #ifdef __KERNEL__
+#define NVMAP_IOC_WRITE_LEGACY \
+	_IOW(NVMAP_IOC_MAGIC, 6, struct nvmap_rw_handle_legacy)
+#define NVMAP_IOC_READ_LEGACY \
+	_IOW(NVMAP_IOC_MAGIC, 7, struct nvmap_rw_handle_legacy)
 #ifdef CONFIG_COMPAT
 #define NVMAP_IOC_WRITE_32   _IOW(NVMAP_IOC_MAGIC, 6, struct nvmap_rw_handle_32)
 #define NVMAP_IOC_READ_32    _IOW(NVMAP_IOC_MAGIC, 7, struct nvmap_rw_handle_32)

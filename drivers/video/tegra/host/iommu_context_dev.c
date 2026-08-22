@@ -17,9 +17,11 @@
  */
 
 #include <linux/dma-mapping.h>
+#include <linux/dma-iommu.h>
 #include <linux/of_platform.h>
 #include <linux/of_device.h>
 #include <linux/module.h>
+#include <linux/mm.h>
 #include <linux/iommu.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
@@ -28,6 +30,7 @@
 #include <linux/version.h>
 #include <linux/dma-buf.h>
 #include <linux/nvhost.h>
+#include <linux/vmalloc.h>
 
 #include <iommu_context_dev.h>
 
@@ -57,6 +60,7 @@ struct iommu_ctx {
 };
 
 static LIST_HEAD(iommu_ctx_list);
+static LIST_HEAD(iommu_static_mappings_list);
 static DEFINE_MUTEX(iommu_ctx_list_mutex);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
@@ -143,9 +147,131 @@ void iommu_context_dev_release(struct platform_device *pdev)
 	mutex_unlock(&iommu_ctx_list_mutex);
 }
 
+static void __iommu_context_dev_unmap_static(struct platform_device *pdev,
+				struct iommu_static_mapping *mapping)
+{
+	struct iommu_domain *domain = iommu_get_domain_for_dev(&pdev->dev);
+	dma_addr_t iova = round_down(mapping->paddr, (dma_addr_t)PAGE_SIZE);
+	size_t offset = mapping->paddr - iova;
+	size_t size = PAGE_ALIGN(offset + mapping->size);
+
+	if (!domain)
+		return;
+
+	iommu_unmap(domain, iova, size);
+	iommu_dma_free_iova(&pdev->dev, iova, size);
+}
+
+static int __iommu_context_dev_map_static(struct platform_device *pdev,
+			       struct iommu_static_mapping *mapping)
+{
+	struct iommu_domain *domain = iommu_get_domain_for_dev(&pdev->dev);
+	dma_addr_t iova = round_down(mapping->paddr, (dma_addr_t)PAGE_SIZE);
+	unsigned long vaddr = (unsigned long)mapping->vaddr;
+	size_t offset = mapping->paddr - iova;
+	size_t size = PAGE_ALIGN(offset + mapping->size);
+	dma_addr_t reserved;
+	size_t mapped = 0;
+	int err = 0;
+
+	if (!domain)
+		return -ENODEV;
+
+	if (!(domain->pgsize_bitmap & PAGE_SIZE))
+		return -EINVAL;
+
+	if (offset_in_page(vaddr) != offset)
+		return -EINVAL;
+
+	/*
+	 * The hardware continues to use the IOVA allocated in the host1x DMA
+	 * domain. Reserve that exact range in this context-bank DMA domain so
+	 * later dma-buf mappings cannot collide with the static pushbuffer.
+	 */
+	reserved = iommu_dma_alloc_iova(&pdev->dev, size, iova + size - 1);
+	if (reserved != iova) {
+		if (reserved)
+			iommu_dma_free_iova(&pdev->dev, reserved, size);
+		return -ENOSPC;
+	}
+
+	while (mapped < size) {
+		unsigned long va = round_down(vaddr, PAGE_SIZE) + mapped;
+		struct page *page;
+		phys_addr_t phys;
+
+		page = virt_addr_valid((void *)va) ? virt_to_page((void *)va) :
+			vmalloc_to_page((void *)va);
+		if (!page) {
+			err = -EFAULT;
+			goto fail;
+		}
+
+		phys = page_to_phys(page);
+		err = iommu_map(domain, iova + mapped, phys, PAGE_SIZE,
+				IOMMU_READ | IOMMU_WRITE);
+		if (err)
+			goto fail;
+
+		mapped += PAGE_SIZE;
+	}
+
+	return 0;
+
+fail:
+	if (mapped)
+		iommu_unmap(domain, iova, mapped);
+	iommu_dma_free_iova(&pdev->dev, iova, size);
+	return err;
+}
+
+int iommu_context_dev_map_static(void *vaddr, dma_addr_t iova, size_t size)
+{
+	struct iommu_static_mapping *mapping;
+	struct iommu_ctx *ctx, *failed = NULL;
+	int err = 0;
+
+	mapping = kzalloc(sizeof(*mapping), GFP_KERNEL);
+	if (!mapping)
+		return -ENOMEM;
+
+	INIT_LIST_HEAD(&mapping->list);
+	mapping->vaddr = vaddr;
+	mapping->paddr = iova;
+	mapping->size = size;
+
+	mutex_lock(&iommu_ctx_list_mutex);
+
+	list_for_each_entry(ctx, &iommu_ctx_list, list) {
+		err = __iommu_context_dev_map_static(ctx->pdev, mapping);
+		if (err) {
+			failed = ctx;
+			break;
+		}
+	}
+
+	if (err) {
+		list_for_each_entry(ctx, &iommu_ctx_list, list) {
+			if (ctx == failed)
+				break;
+			__iommu_context_dev_unmap_static(ctx->pdev, mapping);
+		}
+		mutex_unlock(&iommu_ctx_list_mutex);
+		kfree(mapping);
+		return err;
+	}
+
+	list_add_tail(&mapping->list, &iommu_static_mappings_list);
+	mutex_unlock(&iommu_ctx_list_mutex);
+
+	return 0;
+}
+
 static int iommu_context_dev_probe(struct platform_device *pdev)
 {
+	struct iommu_static_mapping *mapping, *failed = NULL;
 	struct iommu_ctx *ctx;
+	int err = 0;
 
 	if (!nvhost_get_chip_ops()) {
 		dev_warn(&pdev->dev, "nvhost was not initialized, deferring probe.");
@@ -186,6 +312,26 @@ static int iommu_context_dev_probe(struct platform_device *pdev)
 	ctx->pdev = pdev;
 
 	mutex_lock(&iommu_ctx_list_mutex);
+	list_for_each_entry(mapping, &iommu_static_mappings_list, list) {
+		err = __iommu_context_dev_map_static(pdev, mapping);
+		if (err) {
+			failed = mapping;
+			break;
+		}
+	}
+
+	if (err) {
+		list_for_each_entry(mapping, &iommu_static_mappings_list, list) {
+			if (mapping == failed)
+				break;
+			__iommu_context_dev_unmap_static(pdev, mapping);
+		}
+		mutex_unlock(&iommu_ctx_list_mutex);
+		dev_err(&pdev->dev, "failed to map static host1x buffer: %d\n",
+			err);
+		return err;
+	}
+
 	list_add_tail(&ctx->list, &iommu_ctx_list);
 	mutex_unlock(&iommu_ctx_list_mutex);
 
@@ -214,9 +360,12 @@ static int iommu_context_dev_probe(struct platform_device *pdev)
 
 static int __exit iommu_context_dev_remove(struct platform_device *pdev)
 {
+	struct iommu_static_mapping *mapping;
 	struct iommu_ctx *ctx = platform_get_drvdata(pdev);
 
 	mutex_lock(&iommu_ctx_list_mutex);
+	list_for_each_entry(mapping, &iommu_static_mappings_list, list)
+		__iommu_context_dev_unmap_static(pdev, mapping);
 	list_del(&ctx->list);
 	mutex_unlock(&iommu_ctx_list_mutex);
 

@@ -18,6 +18,7 @@
 #include <linux/platform_device.h>
 #include <linux/tegra_nvadsp.h>
 #include <linux/irqchip/tegra-agic.h>
+#include <soc/tegra/fuse.h>
 
 #include "dev.h"
 
@@ -287,8 +288,19 @@ int nvadsp_setup_hwmbox_interrupts(struct platform_device *pdev)
 	struct nvadsp_drv_data *drv = platform_get_drvdata(pdev);
 	struct device *dev = &pdev->dev;
 	u32 empty_int_ie = drv->chip_data->hwmb.empty_int_ie;
+	bool program_empty_int_ie;
 	int recv_virq, send_virq;
 	int ret;
+
+	/*
+	 * Tegra186 AHSP mailboxes do not expose the EMPTY_INT_IE register
+	 * at HWMBOX + 0x8 to CCPLEX.  The downstream T186 4.9 driver
+	 * relied solely on the AGIC-routed HWMBOX1 empty interrupt and did
+	 * not access this register.  Newer Tegra generations using the same
+	 * tegra18x chip-data do require the explicit interrupt enable.
+	 */
+	program_empty_int_ie = empty_int_ie &&
+			       tegra_get_chip_id() != TEGRA186;
 
 	recv_virq = drv->agic_irqs[MBOX_RECV_VIRQ];
 	send_virq = drv->agic_irqs[MBOX_SEND_VIRQ];
@@ -298,12 +310,12 @@ int nvadsp_setup_hwmbox_interrupts(struct platform_device *pdev)
 	if (ret)
 		goto err;
 
-	if (empty_int_ie)
+	if (program_empty_int_ie)
 		hwmbox_writel(0x0, send_hwmbox() + empty_int_ie);
 	ret = devm_request_irq(dev, send_virq, hwmbox_send_empty_int_handler,
 			  IRQF_TRIGGER_RISING,
 			  "hwmbox1_send_empty", pdev);
-	if (empty_int_ie)
+	if (program_empty_int_ie)
 		hwmbox_writel(0x1, send_hwmbox() + empty_int_ie);
 	if (ret)
 		goto free_interrupts;
