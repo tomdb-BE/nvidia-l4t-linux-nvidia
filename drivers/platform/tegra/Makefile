@@ -95,7 +95,7 @@ endif
 
 obj-$(CONFIG_ARCH_TEGRA_210_SOC) += mselect.o
 obj-$(CONFIG_TEGRA_HSP) += tegra-hsp.o
-obj-$(CONFIG_TEGRA_HSP) += tegra186-hsp.o
+obj-$(CONFIG_TEGRA_HSP_SM) += tegra186-hsp.o
 obj-$(CONFIG_TEGRA_WAKEUP) += tegra-wakeups.o
 
 obj-$(CONFIG_TEGRA_FIRMWARES_CLASS)    += firmwares.o

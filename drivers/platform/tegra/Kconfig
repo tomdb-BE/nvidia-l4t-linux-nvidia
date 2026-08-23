@@ -59,6 +59,7 @@ config TEGRA_CAMERA_RTCPU
 	bool "Enable Tegra Camera RTCPU Driver"
 	depends on (ARCH_TEGRA_18x_SOC || ARCH_TEGRA_186_SOC)
 	select NV_TEGRA_IVC
+	select TEGRA_HSP_SM
 
 config TEGRA_CAMERA_HSP_MBOX_CLIENT
 	bool "Enable Mailbox Client Implementation of HSP Protocol for Camera"
@@ -227,10 +228,22 @@ config TEGRA_HV_XHCI_DEBUG
 	help
 	  Enable Tegra XHCI Server debugging when runs in virtualization.
 
+config TEGRA_HSP_SM
+	bool
+	help
+	  Builds the NVIDIA Tegra186 shared-mailbox/shared-semaphore HSP
+	  provider used by Camera RTCPU and other legacy firmware protocols.
+
 config TEGRA_HSP
-	bool "Enable Tegra Hardware Synchronization Primitives driver"
-	depends on ARCH_TEGRA_18x_SOC
-	default y
+	bool "Enable legacy Tegra TOP0 HSP doorbell driver"
+	depends on ARCH_TEGRA_18x_SOC || ARCH_TEGRA_186_SOC
+	select TEGRA_HSP_SM
+	default y if ARCH_TEGRA_18x_SOC
+	help
+	  Enables NVIDIA's legacy TOP0 HSP doorbell API.  This is separate
+	  from the Tegra186 shared-mailbox provider and should not be enabled
+	  merely for Camera RTCPU on kernels using the upstream HSP mailbox
+	  controller.
 
 config TEGRA_NVDUMPER
 	bool "Enable nvdumper"

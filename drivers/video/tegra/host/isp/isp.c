@@ -33,6 +33,7 @@
 #include "bus_client.h"
 #include "nvhost_acm.h"
 #include "t210/t210.h"
+#include "t186/t186.h"
 
 #include <linux/uaccess.h>
 #include <linux/fs.h>
@@ -49,12 +50,16 @@
 #define ISPA_DEV_ID		0
 #define ISPB_DEV_ID		1
 #define ISP_OVERHEAD_T210	10
+#define ISP_PPC_T186		2
+#define ISP_OVERHEAD_T186	17
 
 static struct of_device_id tegra_isp_of_match[] = {
 #ifdef TEGRA_21X_OR_HIGHER_CONFIG
 	{ .compatible = "nvidia,tegra210-isp",
 		.data = (struct nvhost_device_data *)&t21_isp_info },
 #endif
+	{ .compatible = "nvidia,tegra186-isp",
+		.data = (struct nvhost_device_data *)&t18_isp_info },
 	{ },
 };
 
@@ -159,31 +164,44 @@ static int isp_probe(struct platform_device *dev)
 	memset(&isp_info, 0, sizeof(isp_info));
 
 	if (dev->dev.of_node) {
-		/*
-		 * For older kernels, we use "isp.0" for ispa
-		 * and "isp.1" for ispb
-		 *
-		 * For newer kernels, we use "54600000.isp" for ispa
-		 * and "54680000.isp" for ispb
-		 *
-		 */
-		if (strcmp(dev->name, "isp.0") == 0
-				|| strcmp(dev->name, "54600000.isp") == 0)
-			dev_id = ISPA_DEV_ID;
-		else if (strcmp(dev->name, "isp.1") == 0
-				|| strcmp(dev->name, "54680000.isp") == 0)
-			dev_id = ISPB_DEV_ID;
-		else
-			return -EINVAL;
+		if (nvhost_is_186()) {
+			const struct of_device_id *match;
 
-		if (nvhost_is_210()) {
-			if (dev_id == ISPB_DEV_ID)
-				pdata = &t21_ispb_info;
-			if (dev_id == ISPA_DEV_ID)
-				pdata = &t21_isp_info;
-			/* 10% overhead */
-			isp_info.overhead = ISP_OVERHEAD_T210;
-			isp_info.use_max = true;
+			/*
+			 * T186 only has one ISP.  Do not use the newer
+			 * T210/T194 device-name based ISPA/ISPB selection.
+			 */
+			match = of_match_device(tegra_isp_of_match, &dev->dev);
+			if (match)
+				pdata = (struct nvhost_device_data *)match->data;
+
+			/* NVIDIA 4.9 T186 values: 2% HW + 15% SW overhead */
+			isp_info.overhead = ISP_OVERHEAD_T186;
+			isp_info.ppc = ISP_PPC_T186;
+		} else {
+			/*
+			 * For older kernels, ISPA/ISPB used isp.0/isp.1.
+			 * Newer Tegra generations use address based names.
+			 */
+			if (strcmp(dev->name, "isp.0") == 0
+					|| strcmp(dev->name, "54600000.isp") == 0)
+				dev_id = ISPA_DEV_ID;
+			else if (strcmp(dev->name, "isp.1") == 0
+					|| strcmp(dev->name, "54680000.isp") == 0)
+				dev_id = ISPB_DEV_ID;
+			else
+				return -EINVAL;
+
+			if (nvhost_is_210()) {
+				if (dev_id == ISPB_DEV_ID)
+					pdata = &t21_ispb_info;
+				if (dev_id == ISPA_DEV_ID)
+					pdata = &t21_isp_info;
+
+				/* 10% overhead */
+				isp_info.overhead = ISP_OVERHEAD_T210;
+				isp_info.use_max = true;
+			}
 		}
 	} else
 		pdata = (struct nvhost_device_data *)dev->dev.platform_data;

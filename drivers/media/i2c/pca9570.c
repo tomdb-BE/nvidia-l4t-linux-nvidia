@@ -336,6 +336,7 @@ static const struct i2c_device_id pca9570_id[] = {
 
 const static struct of_device_id pca9570_of_match[] = {
 	{ .compatible = "nxp,pca9570", },
+	{ .compatible = "nvidia,pca9570", },
 	{ },
 };
 MODULE_DEVICE_TABLE(i2c, pca9570_id);

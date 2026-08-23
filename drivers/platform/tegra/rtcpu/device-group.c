@@ -138,3 +138,63 @@ struct platform_device *camrtc_device_get_byname(
 
 	return platform_device_get(grp->devices[index]);
 }
+
+
+int camrtc_device_group_busy(const struct camrtc_device_group *grp)
+{
+	int err = -EINVAL, index, idle;
+
+	if (!grp)
+		return 0;
+
+	if (IS_ERR(grp))
+		return err;
+
+	for (index = 0; index < grp->ndevices; index++) {
+		if (!grp->devices[index])
+			continue;
+
+		err = nvhost_module_busy(grp->devices[index]);
+		if (err < 0)
+			goto error;
+	}
+
+	return 0;
+
+error:
+	for (idle = 0; idle < index; idle++)
+		if (grp->devices[idle])
+			nvhost_module_idle(grp->devices[idle]);
+
+	return err;
+}
+EXPORT_SYMBOL(camrtc_device_group_busy);
+
+void camrtc_device_group_idle(const struct camrtc_device_group *grp)
+{
+	int index;
+
+	if (IS_ERR_OR_NULL(grp))
+		return;
+
+	for (index = 0; index < grp->ndevices; index++)
+		if (grp->devices[index])
+			nvhost_module_idle(grp->devices[index]);
+}
+EXPORT_SYMBOL(camrtc_device_group_idle);
+
+void camrtc_device_group_reset(const struct camrtc_device_group *grp)
+{
+	int index;
+
+	if (IS_ERR_OR_NULL(grp))
+		return;
+
+	for (index = 0; index < grp->ndevices; index++) {
+		if (!grp->devices[index])
+			continue;
+
+		nvhost_module_reset(grp->devices[index], false);
+	}
+}
+EXPORT_SYMBOL(camrtc_device_group_reset);

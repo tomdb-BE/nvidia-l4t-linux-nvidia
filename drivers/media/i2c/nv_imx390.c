@@ -51,6 +51,7 @@
 
 static const struct of_device_id imx390_of_match[] = {
 	{ .compatible = "sony,imx390",},
+	{ .compatible = "nvidia,imx390", },
 	{ },
 };
 MODULE_DEVICE_TABLE(of, imx390_of_match);

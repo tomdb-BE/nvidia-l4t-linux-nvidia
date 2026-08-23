@@ -541,6 +541,7 @@ static const struct i2c_device_id max9295_id[] = {
 
 static const struct of_device_id max9295_of_match[] = {
 	{ .compatible = "maxim,max9295", },
+	{ .compatible = "nvidia,max9295", },
 	{ },
 };
 MODULE_DEVICE_TABLE(of, max9295_of_match);

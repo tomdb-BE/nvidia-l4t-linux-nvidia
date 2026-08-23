@@ -20,8 +20,17 @@
 #include "streamid_regs.c"
 #include "host1x/host1x.h"
 #include "class_ids.h"
+#include "class_ids_t186.h"
 #include "flcn/flcn.h"
 #include "nvdec/nvdec.h"
+#if IS_ENABLED(CONFIG_TEGRA_GRHOST_ISP)
+#include "isp/isp.h"
+#include "isp/isp_isr_v2.h"
+#endif
+#include "nvcsi/nvcsi.h"
+#if IS_ENABLED(CONFIG_VIDEO_TEGRA_VI)
+#include <video/vi4.h>
+#endif
 
 #define HOST_EMC_FLOOR 204000000
 #define HOST_NVDEC_EMC_FLOOR 102000000
@@ -89,6 +98,84 @@ static int nvhost_nvdec_t186_finalize_poweron(struct platform_device *dev)
 	return err;
 }
 
+
+#if IS_ENABLED(CONFIG_TEGRA_GRHOST_ISP)
+struct nvhost_device_data t18_isp_info = {
+	.num_channels = 1,
+	.moduleid = NVHOST_MODULE_ISP,
+	.class = NV_VIDEO_STREAMING_ISP_CLASS_ID,
+	.modulemutexes = { NV_HOST1X_MLOCK_ID_ISP },
+	.devfs_name = "isp",
+	.keepalive = true,
+	.can_powergate = true,
+	.autosuspend_delay = 500,
+	.poweron_reset = true,
+	.clocks = { { "isp", 768000000 }, },
+	.finalize_poweron = nvhost_isp_finalize_poweron,
+	.prepare_poweroff = nvhost_isp_prepare_poweroff,
+	.hw_init = nvhost_isp_register_isr_v2,
+	.ctrl_ops = &tegra_isp_ctrl_ops,
+	.resource_policy = RESOURCE_PER_CHANNEL_INSTANCE,
+	.serialize = true,
+	.push_work_done = true,
+	.vm_regs = { { 0x50, true } },
+	.mlock_timeout_factor = 10,
+};
+#endif
+
+#if IS_ENABLED(CONFIG_VIDEO_TEGRA_VI)
+struct nvhost_device_data t18_vi_info = {
+	.devfs_name = "vi",
+	.exclusive = true,
+	.class = NV_VIDEO_STREAMING_VI_CLASS_ID,
+	.modulemutexes = { NV_HOST1X_MLOCK_ID_VI },
+	.keepalive = true,
+	.can_powergate = true,
+	.autosuspend_delay = 500,
+	.poweron_reset = true,
+	.support_abort_on_close = true,
+	.moduleid = NVHOST_MODULE_VI,
+	.clocks = {
+		{ "vi", 408000000 },
+		{ "nvcsi", 204000000 },
+		{ "nvcsilp", 204000000 },
+	},
+	.num_channels = 15,
+	.prepare_poweroff = nvhost_vi4_prepare_poweroff,
+	.finalize_poweron = nvhost_vi4_finalize_poweron,
+	.busy = nvhost_vi4_busy,
+	.idle = nvhost_vi4_idle,
+	.reset = nvhost_vi4_reset,
+	.vm_regs = {
+		{ 0x4000 * 4, true }, { 0x8000 * 4, true },
+		{ 0xc000 * 4, true }, { 0x10000 * 4, true },
+		{ 0x14000 * 4, true }, { 0x18000 * 4, true },
+		{ 0x1c000 * 4, true }, { 0x20000 * 4, true },
+		{ 0x24000 * 4, true }, { 0x28000 * 4, true },
+		{ 0x2c000 * 4, true }, { 0x30000 * 4, true },
+	},
+	.num_ppc = 8,
+	.aggregate_constraints = nvhost_vi4_aggregate_constraints,
+};
+#endif
+
+struct nvhost_device_data t18_nvcsi_info = {
+	.num_channels = 1,
+	.clocks = { { "nvcsi", 204000000 }, { "nvcsilp", 204000000 }, },
+	.devfs_name = "nvcsi",
+	.modulemutexes = { NV_HOST1X_MLOCK_ID_NVCSI },
+	.class = NV_VIDEO_STREAMING_NVCSI_CLASS_ID,
+	.ctrl_ops = &tegra_nvcsi_ctrl_ops,
+	.can_powergate = true,
+	.autosuspend_delay = 500,
+	.finalize_poweron = nvcsi_finalize_poweron,
+	.prepare_poweroff = nvcsi_prepare_poweroff,
+	.poweron_reset = true,
+	.keepalive = true,
+	.serialize = true,
+	.push_work_done = true,
+};
+
 #if IS_ENABLED(CONFIG_TEGRA_GRHOST_NVENC)
 struct nvhost_device_data t18_msenc_info = {
 	.version = NVHOST_ENCODE_FLCN_VER(6, 1),
@@ -148,6 +235,51 @@ struct nvhost_device_data t18_nvdec_info = {
 	.bwmgr_client_id = TEGRA_BWMGR_CLIENT_NVDEC,
 	.isolate_contexts = true,
 	.mlock_timeout_factor = 3,
+};
+#endif
+
+#if IS_ENABLED(CONFIG_TEGRA_GRHOST_NVJPG)
+/* T186 NVJPG SLCG production values from NVIDIA's 4.9 T18x support. */
+static struct nvhost_gating_register t18x_nvjpg_gating_registers[] = {
+	{ .addr = 0x00000e00, .prod = 0x00000000, .disable = 0xffffffff },
+	{ .addr = 0x00000088, .prod = 0x00000000, .disable = 0x000000ff },
+	{ .addr = 0x0000008c, .prod = 0x00000000, .disable = 0xffffffff },
+	{ .addr = 0x000010a0, .prod = 0x00000000, .disable = 0x00000001 },
+	{ .addr = 0x00001404, .prod = 0x00000000, .disable = 0x00000000 },
+	{ .addr = 0x00001134, .prod = 0x00020008, .disable = 0x0003fffe },
+	{}
+};
+
+struct nvhost_device_data t18_nvjpg_info = {
+	.version = NVHOST_ENCODE_FLCN_VER(1, 1),
+	.devfs_name = "nvjpg",
+	.modulemutexes = { NV_HOST1X_MLOCK_ID_NVJPG },
+	.class = NV_NVJPG_CLASS_ID,
+	.can_powergate = true,
+	.autosuspend_delay = 500,
+	.clocks = {
+		{ "nvjpg", UINT_MAX, 0 },
+		{ "emc", HOST_EMC_FLOOR,
+		  NVHOST_MODULE_ID_EXTERNAL_MEMORY_CONTROLLER,
+		  TEGRA_SET_EMC_SHARED_BW },
+	},
+	.engine_cg_regs = t18x_nvjpg_gating_registers,
+	.engine_can_cg = true,
+	.poweron_reset = true,
+	.finalize_poweron = nvhost_flcn_t186_finalize_poweron,
+	.moduleid = NVHOST_MODULE_NVJPG,
+	.num_channels = 1,
+	.firmware_name = "nvhost_nvjpg011.fw",
+	.serialize = true,
+	.push_work_done = true,
+	.resource_policy = RESOURCE_PER_CHANNEL_INSTANCE,
+	.vm_regs = { { 0x30, true }, { 0x34, false } },
+	.transcfg_addr = 0x1444,
+	.transcfg_val = 0x20,
+	.bwmgr_client_id = TEGRA_BWMGR_CLIENT_NVJPG,
+	.isolate_contexts = true,
+	.mlock_timeout_factor = 3,
+	.module_irq = 14,
 };
 #endif
 

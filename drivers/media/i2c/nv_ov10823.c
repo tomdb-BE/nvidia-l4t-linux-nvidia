@@ -745,6 +745,7 @@ static struct v4l2_subdev_ops ov10823_subdev_ops = {
 
 static struct of_device_id ov10823_of_match[] = {
 	{ .compatible = "ovti,ov10823", },
+	{ .compatible = "nvidia,ov10823", },
 	{ },
 };
 

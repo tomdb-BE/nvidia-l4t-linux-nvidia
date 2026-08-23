@@ -38,6 +38,9 @@ struct camrtc_hsp {
 	const struct camrtc_hsp_op *op;
 	struct tegra_hsp_sm_rx *rx;
 	struct tegra_hsp_sm_tx *tx;
+	struct tegra_hsp_sm_pair *legacy_cmd_pair;
+	struct tegra_hsp_sm_pair *legacy_ivc_pair;
+	bool legacy_suspended;
 	u32 cookie;
 	spinlock_t sendlock;
 	struct tegra_hsp_ss *ss;
@@ -427,8 +430,8 @@ static int camrtc_hsp_vm_probe(struct camrtc_hsp *camhsp)
 
 	camhsp->tx = of_tegra_hsp_sm_tx_by_name(np, obtain = "vm-tx",
 			camrtc_hsp_tx_empty_notify, camhsp);
-	if (IS_ERR(camhsp->rx)) {
-		err = PTR_ERR(camhsp->rx);
+	if (IS_ERR(camhsp->tx)) {
+		err = PTR_ERR(camhsp->tx);
 		goto fail;
 	}
 
@@ -445,6 +448,269 @@ fail:
 		dev_err(&camhsp->dev, "%s: failed to obtain %s: %d\n",
 			np->name, obtain, err);
 	}
+	of_node_put(np);
+	return err;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Protocol nvidia,tegra186-hsp-mailbox (T186 SM4/SM5 firmware) */
+
+static void camrtc_hsp_legacy_cmd_full_notify(void *data, u32 msg)
+{
+	struct camrtc_hsp *camhsp = data;
+
+	atomic_set(&camhsp->response, (int)msg);
+	wake_up(&camhsp->response_waitq);
+}
+
+static void camrtc_hsp_legacy_cmd_empty_notify(void *data, u32 empty_value)
+{
+	struct camrtc_hsp *camhsp = data;
+
+	(void)empty_value;
+	complete(&camhsp->emptied);
+}
+
+static void camrtc_hsp_legacy_ivc_full_notify(void *data, u32 msg)
+{
+	struct camrtc_hsp *camhsp = data;
+
+	(void)msg;
+	/* T186 mailbox doorbells do not carry a channel-group bitmap. */
+	camhsp->group_notify(camhsp->dev.parent, 0xffffU);
+}
+
+static int camrtc_hsp_legacy_send(struct camrtc_hsp *camhsp,
+		int request, long *timeout)
+{
+	for (;;) {
+		if (tegra_hsp_sm_pair_is_empty(camhsp->legacy_cmd_pair)) {
+			atomic_set(&camhsp->response, -1);
+			tegra_hsp_sm_pair_write(camhsp->legacy_cmd_pair,
+					(u32)request);
+			return 0;
+		}
+
+		if (*timeout <= 0)
+			return -ETIMEDOUT;
+
+		reinit_completion(&camhsp->emptied);
+		tegra_hsp_sm_pair_enable_empty_notify(camhsp->legacy_cmd_pair);
+		*timeout = wait_for_completion_timeout(&camhsp->emptied,
+							*timeout);
+	}
+}
+
+static int camrtc_hsp_legacy_sendrecv(struct camrtc_hsp *camhsp,
+		u32 request, long *timeout)
+{
+	return camrtc_hsp_sendrecv(camhsp, (int)request, timeout);
+}
+
+static void camrtc_hsp_legacy_group_ring(struct camrtc_hsp *camhsp,
+		u16 group)
+{
+	(void)group;
+
+	/* NVIDIA 4.9 used a dedicated SM pair as an ungrouped IVC doorbell. */
+	tegra_hsp_sm_pair_write(camhsp->legacy_ivc_pair, 1U);
+}
+
+static int camrtc_hsp_legacy_sync(struct camrtc_hsp *camhsp, long *timeout)
+{
+	u32 request;
+	int response;
+	u32 version;
+
+	request = RTCPU_COMMAND(INIT, 0U);
+	response = camrtc_hsp_legacy_sendrecv(camhsp, request, timeout);
+	if (response < 0)
+		return response;
+	if ((u32)response != request) {
+		dev_err(&camhsp->dev,
+			"RTCPU INIT mismatch: request=0x%08x response=0x%08x\n",
+			request, (u32)response);
+		return -EIO;
+	}
+
+	request = RTCPU_COMMAND(FW_VERSION, RTCPU_DRIVER_SM5_VERSION);
+	response = camrtc_hsp_legacy_sendrecv(camhsp, request, timeout);
+	if (response < 0)
+		return response;
+	if (RTCPU_GET_COMMAND_ID(response) != RTCPU_CMD_FW_VERSION) {
+		dev_err(&camhsp->dev,
+			"RTCPU FW_VERSION mismatch: 0x%08x\n", (u32)response);
+		return -EIO;
+	}
+
+	version = RTCPU_GET_COMMAND_VALUE(response);
+	if (version < RTCPU_FW_SM4_VERSION) {
+		dev_err(&camhsp->dev,
+			"RTCPU firmware too old: %u\n", version);
+		return -EIO;
+	}
+
+	camhsp->legacy_suspended = false;
+	return (int)version;
+}
+
+static int camrtc_hsp_legacy_resume(struct camrtc_hsp *camhsp, long *timeout)
+{
+	int response;
+
+	if (!camhsp->legacy_suspended)
+		return 0;
+
+	/*
+	 * NVIDIA 4.9 cleared boot_sync_done on PM_SUSPEND and repeated the
+	 * INIT/FW_VERSION handshake on runtime resume.  5.10 splits that into
+	 * sync() and resume(), so repeat the legacy handshake here only after a
+	 * successful suspend.
+	 */
+	response = camrtc_hsp_legacy_sync(camhsp, timeout);
+	if (response < 0)
+		return response;
+
+	camhsp->legacy_suspended = false;
+	return 0;
+}
+
+static int camrtc_hsp_legacy_suspend(struct camrtc_hsp *camhsp,
+		long *timeout)
+{
+	u32 request = RTCPU_COMMAND(PM_SUSPEND, 0U);
+	int response = camrtc_hsp_legacy_sendrecv(camhsp, request, timeout);
+	u32 expected = RTCPU_COMMAND(PM_SUSPEND, RTCPU_PM_SUSPEND_SUCCESS);
+
+	if (response < 0)
+		return response;
+	if ((u32)response == expected) {
+		camhsp->legacy_suspended = true;
+		return 0;
+	}
+
+	dev_err(&camhsp->dev,
+		"legacy PM_SUSPEND failed: 0x%08x\n", (u32)response);
+	return -EIO;
+}
+
+static int camrtc_hsp_legacy_bye(struct camrtc_hsp *camhsp, long *timeout)
+{
+	(void)camhsp;
+	(void)timeout;
+
+	/* BYE was introduced with the SM6 HSP-VM protocol. */
+	return 0;
+}
+
+static int camrtc_hsp_legacy_ch_setup(struct camrtc_hsp *camhsp,
+		dma_addr_t iova, long *timeout)
+{
+	u32 request = RTCPU_COMMAND(CH_SETUP, (u32)(iova >> 8));
+	int response = camrtc_hsp_legacy_sendrecv(camhsp, request, timeout);
+
+	if (response < 0)
+		return response;
+	if (RTCPU_GET_COMMAND_ID(response) == RTCPU_CMD_ERROR) {
+		u32 error = RTCPU_GET_COMMAND_VALUE(response);
+
+		return error != 0U ? (int)error : -EIO;
+	}
+	/* NVIDIA 4.9 treated any non-ERROR response as success. */
+	return 0;
+}
+
+static int camrtc_hsp_legacy_ping(struct camrtc_hsp *camhsp,
+		u32 data, long *timeout)
+{
+	u32 request = RTCPU_COMMAND(PING, data & 0xffffffU);
+	int response = camrtc_hsp_legacy_sendrecv(camhsp, request, timeout);
+
+	if (response < 0)
+		return response;
+	if (RTCPU_GET_COMMAND_ID(response) != RTCPU_CMD_PING)
+		return -EIO;
+
+	return (int)RTCPU_GET_COMMAND_VALUE(response);
+}
+
+static int camrtc_hsp_legacy_get_fw_hash(struct camrtc_hsp *camhsp,
+		u32 index, long *timeout)
+{
+	u32 request = RTCPU_COMMAND(FW_HASH, index);
+	int response = camrtc_hsp_legacy_sendrecv(camhsp, request, timeout);
+	u32 value;
+
+	if (response < 0)
+		return response;
+	if (RTCPU_GET_COMMAND_ID(response) != RTCPU_CMD_FW_HASH)
+		return -EIO;
+
+	value = RTCPU_GET_COMMAND_VALUE(response);
+	return value <= 0xffU ? (int)value : -EIO;
+}
+
+static const struct camrtc_hsp_op camrtc_hsp_legacy_ops = {
+	.send = camrtc_hsp_legacy_send,
+	.group_ring = camrtc_hsp_legacy_group_ring,
+	.sync = camrtc_hsp_legacy_sync,
+	.resume = camrtc_hsp_legacy_resume,
+	.suspend = camrtc_hsp_legacy_suspend,
+	.bye = camrtc_hsp_legacy_bye,
+	.ch_setup = camrtc_hsp_legacy_ch_setup,
+	.ping = camrtc_hsp_legacy_ping,
+	.get_fw_hash = camrtc_hsp_legacy_get_fw_hash,
+};
+
+static int camrtc_hsp_legacy_probe(struct camrtc_hsp *camhsp)
+{
+	struct device_node *np = camhsp->dev.parent->of_node;
+	int err;
+
+	np = of_get_compatible_child(np, "nvidia,tegra186-hsp-mailbox");
+	if (np == NULL || !of_device_is_available(np)) {
+		of_node_put(np);
+		return -ENOTSUPP;
+	}
+
+	camhsp->legacy_cmd_pair = of_tegra_hsp_sm_pair_by_name(np,
+			"cmd-pair", camrtc_hsp_legacy_cmd_full_notify,
+			camrtc_hsp_legacy_cmd_empty_notify, camhsp);
+	if (IS_ERR(camhsp->legacy_cmd_pair)) {
+		err = PTR_ERR(camhsp->legacy_cmd_pair);
+		camhsp->legacy_cmd_pair = NULL;
+		goto fail;
+	}
+
+	camhsp->legacy_ivc_pair = of_tegra_hsp_sm_pair_by_name(np,
+			"ivc-pair", camrtc_hsp_legacy_ivc_full_notify,
+			NULL, camhsp);
+	if (IS_ERR(camhsp->legacy_ivc_pair)) {
+		err = PTR_ERR(camhsp->legacy_ivc_pair);
+		camhsp->legacy_ivc_pair = NULL;
+		goto fail;
+	}
+
+	camhsp->dev.of_node = np;
+	camhsp->op = &camrtc_hsp_legacy_ops;
+	dev_set_name(&camhsp->dev, "%s:%s",
+		dev_name(camhsp->dev.parent), np->name);
+	dev_info(&camhsp->dev, "using Tegra186 SM4/SM5 mailbox protocol\n");
+
+	return 0;
+
+fail:
+	if (camhsp->legacy_ivc_pair != NULL) {
+		tegra_hsp_sm_pair_free(camhsp->legacy_ivc_pair);
+		camhsp->legacy_ivc_pair = NULL;
+	}
+	if (camhsp->legacy_cmd_pair != NULL) {
+		tegra_hsp_sm_pair_free(camhsp->legacy_cmd_pair);
+		camhsp->legacy_cmd_pair = NULL;
+	}
+	if (err != -EPROBE_DEFER)
+		dev_err(&camhsp->dev, "%s: legacy HSP probe failed: %d\n",
+			np->name, err);
 	of_node_put(np);
 	return err;
 }
@@ -640,6 +906,10 @@ static void camrtc_hsp_combo_dev_release(struct device *dev)
 		tegra_hsp_sm_tx_free(camhsp->tx);
 	if (!IS_ERR_OR_NULL(camhsp->ss))
 		tegra_hsp_ss_free(camhsp->ss);
+	if (!IS_ERR_OR_NULL(camhsp->legacy_cmd_pair))
+		tegra_hsp_sm_pair_free(camhsp->legacy_cmd_pair);
+	if (!IS_ERR_OR_NULL(camhsp->legacy_ivc_pair))
+		tegra_hsp_sm_pair_free(camhsp->legacy_ivc_pair);
 
 	of_node_put(dev->of_node);
 	kfree(camhsp);
@@ -650,6 +920,10 @@ static int camrtc_hsp_probe(struct camrtc_hsp *camhsp)
 	int ret;
 
 	ret = camrtc_hsp_vm_probe(camhsp);
+	if (ret != -ENOTSUPP)
+		return ret;
+
+	ret = camrtc_hsp_legacy_probe(camhsp);
 	if (ret != -ENOTSUPP)
 		return ret;
 

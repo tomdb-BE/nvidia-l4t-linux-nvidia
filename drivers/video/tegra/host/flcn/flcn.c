@@ -51,6 +51,10 @@
 #include "t210/t210.h"
 #include "t186/t186.h"
 
+#if IS_ENABLED(CONFIG_TEGRA_GRHOST_NVJPG)
+extern struct nvhost_device_data t18_nvjpg_info;
+#endif
+
 #include "t194/t194.h"
 #include "t23x/t23x.h"
 #ifdef CONFIG_TEGRA_T239_GRHOST
@@ -825,6 +829,8 @@ static struct of_device_id tegra_flcn_of_match[] = {
 		.name = "nvenc" },
 #endif
 #if IS_ENABLED(CONFIG_TEGRA_GRHOST_NVJPG)
+	{ .compatible = "nvidia,tegra186-nvjpg",
+		.data = (struct nvhost_device_data *)&t18_nvjpg_info },
 	{ .compatible = "nvidia,tegra210-nvjpg",
 		.data = (struct nvhost_device_data *)&t21_nvjpg_info },
 	{ .compatible = "nvidia,tegra194-nvjpg",

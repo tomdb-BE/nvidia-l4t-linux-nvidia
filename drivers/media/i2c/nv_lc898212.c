@@ -175,6 +175,7 @@ static struct lc898212_reg lc898212_init_setting[] = {
 
 const static struct of_device_id lc898212_of_match[] = {
 	{ .compatible = "onnn,lc898212", },
+	{ .compatible = "nvidia,lc898212", },
 	{ },
 };
 MODULE_DEVICE_TABLE(of, lc898212_of_match);

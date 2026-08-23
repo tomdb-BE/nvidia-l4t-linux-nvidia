@@ -1124,6 +1124,60 @@ static void tegra_ahci_disable_clks(struct ahci_host_priv *hpriv)
 	clk_disable_unprepare(tegra->sata_clk);
 }
 
+/*
+ * The downstream Tegra AHCI driver carries its own resource acquisition
+ * and power sequencing. In the 4.9 kernel, ahci_platform_enable_resources()
+ * only handled per-port target regulators, generic clocks and PHYs.
+ *
+ * Linux 5.10 additionally makes that helper enable generic AHCI/PHY
+ * regulators and deassert the generic reset array. Those fields are not
+ * populated by the Tegra resource path, so using the 5.10 helper would
+ * dereference NULL regulator pointers.
+ *
+ * Preserve the 4.9 Tegra semantics here: optional target power and the
+ * optional SATA PHY are handled here; Tegra clocks and resets remain under
+ * the Tegra-specific sequencing below.
+ */
+static int tegra_ahci_enable_platform_resources(struct ahci_host_priv *hpriv)
+{
+	int i, ret;
+
+	for (i = 0; i < hpriv->nports; i++) {
+		if (!hpriv->target_pwrs[i])
+			continue;
+
+		ret = regulator_enable(hpriv->target_pwrs[i]);
+		if (ret)
+			goto disable_target_pwrs;
+	}
+
+	ret = ahci_platform_enable_phys(hpriv);
+	if (ret)
+		goto disable_target_pwrs;
+
+	return 0;
+
+disable_target_pwrs:
+	while (--i >= 0) {
+		if (hpriv->target_pwrs[i])
+			regulator_disable(hpriv->target_pwrs[i]);
+	}
+
+	return ret;
+}
+
+static void tegra_ahci_disable_platform_resources(struct ahci_host_priv *hpriv)
+{
+	int i;
+
+	ahci_platform_disable_phys(hpriv);
+
+	for (i = 0; i < hpriv->nports; i++) {
+		if (hpriv->target_pwrs[i])
+			regulator_disable(hpriv->target_pwrs[i]);
+	}
+}
+
 static int tegra_ahci_power_on(struct ahci_host_priv *hpriv)
 {
 	struct tegra_ahci_priv *tegra = hpriv->plat_data;
@@ -1153,7 +1207,7 @@ static int tegra_ahci_power_on(struct ahci_host_priv *hpriv)
 	if (ret)
 		goto disable_regulators;
 
-	ret = ahci_platform_enable_resources(hpriv);
+	ret = tegra_ahci_enable_platform_resources(hpriv);
 	if (ret)
 		goto disable_regulators;
 
@@ -1185,7 +1239,7 @@ static void tegra_ahci_power_off(struct ahci_host_priv *hpriv)
 {
 	struct tegra_ahci_priv *tegra = hpriv->plat_data;
 
-	ahci_platform_disable_resources(hpriv);
+	tegra_ahci_disable_platform_resources(hpriv);
 
 	reset_control_assert(tegra->sata_rst);
 	if (tegra->sata_oob_rst)

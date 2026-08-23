@@ -1158,6 +1158,7 @@ static int ov9281_verify_chip_id(struct ov9281 *priv)
 
 static const struct of_device_id ov9281_of_match[] = {
 	{ .compatible = "ovti,ov9281", },
+	{ .compatible = "nvidia,ov9281", },
 	{ },
 };
 

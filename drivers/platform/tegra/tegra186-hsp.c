@@ -1004,6 +1004,8 @@ static const struct dev_pm_ops tegra_hsp_pm_ops = {
 
 static const struct of_device_id tegra_hsp_of_match[] = {
 	{ .compatible = NV(tegra186-hsp), },
+	/* Legacy-only match avoids competing with the upstream HSP mailbox driver. */
+	{ .compatible = "nvidia,tegra186-hsp-legacy", },
 	{ },
 };
 

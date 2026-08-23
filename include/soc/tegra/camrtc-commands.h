@@ -112,12 +112,14 @@
  */
 #define RTCPU_CMD_FW_VERSION		MK_U32(1)
 #define RTCPU_CMD_RESERVED_02		MK_U32(2)
-#define RTCPU_CMD_RESERVED_03		MK_U32(3)
+#define RTCPU_CMD_PING			MK_U32(3)
+#define RTCPU_CMD_RESERVED_03		RTCPU_CMD_PING
 /**
  * Release RCE FW resources assigned to given VM client, during runtime suspend or SC7.
  */
 #define RTCPU_CMD_PM_SUSPEND		MK_U32(4)
-#define RTCPU_CMD_RESERVED_05		MK_U32(5)
+#define RTCPU_CMD_FW_HASH		MK_U32(5)
+#define RTCPU_CMD_RESERVED_05		RTCPU_CMD_FW_HASH
 /**
  * Used to set up a shared memory area (such as IVC channels, trace buffer etc)
  * between Camera VM and RCE FW.

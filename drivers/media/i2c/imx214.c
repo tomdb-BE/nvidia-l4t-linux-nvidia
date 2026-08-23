@@ -511,6 +511,7 @@ static struct v4l2_subdev_ops imx214_subdev_ops = {
 
 static struct of_device_id imx214_of_match[] = {
 	{ .compatible = "sony,imx214", },
+	{ .compatible = "nvidia,imx214", },
 	{ },
 };
 

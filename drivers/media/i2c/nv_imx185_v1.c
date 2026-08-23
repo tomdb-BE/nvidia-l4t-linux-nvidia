@@ -525,6 +525,7 @@ static struct v4l2_subdev_ops imx185_subdev_ops = {
 
 const static struct of_device_id imx185_of_match[] = {
 	{ .compatible = "sony,imx185_v1",},
+	{ .compatible = "nvidia,imx185_v1", },
 	{ },
 };
 
