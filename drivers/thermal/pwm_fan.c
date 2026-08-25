@@ -1046,12 +1046,18 @@ static int pwm_fan_probe(struct platform_device *pdev)
 		return -ENODEV;
 	}
 
-	of_err |= of_property_read_string(node, "name", &fan_data->name);
+	err = of_property_read_string(node, "name", &fan_data->name);
+	if (err)
+		fan_data->name = node->name;
 	pr_info("FAN dev name: %s\n", fan_data->name);
 
 	pwm_fan_gpio = of_get_named_gpio(data_node, "pwm_gpio", 0);
-	if (pwm_fan_gpio < 0)
-		of_err |= pwm_fan_gpio;
+	if (pwm_fan_gpio < 0) {
+		err = pwm_fan_gpio;
+		if (err != -EPROBE_DEFER)
+			dev_err(&pdev->dev, "FAN: invalid pwm_gpio: %d\n", err);
+		goto gpio_request_fail;
+	}
 
 	err = gpio_request(pwm_fan_gpio, "pwm-fan");
 	if (err < 0) {
@@ -1149,8 +1155,10 @@ static int pwm_fan_probe(struct platform_device *pdev)
 		fan_data->current_profile = 0;
 		i = 0;
 		for_each_available_child_of_node (base_profile_node, profile_node) {
-			of_err |= of_property_read_string(profile_node, "name",
+			err = of_property_read_string(profile_node, "name",
 					&fan_data->fan_profile_names[i]);
+			if (err)
+				fan_data->fan_profile_names[i] = profile_node->name;
 			if (default_profile &&
 					!strncmp(default_profile,
 					fan_data->fan_profile_names[i], MAX_PROFILE_NAME_LENGTH)) {
@@ -1433,7 +1441,8 @@ lookup_alloc_fail:
 rrd_alloc_fail:
 rru_alloc_fail:
 rpm_alloc_fail:
-	gpio_free(pwm_fan_gpio);
+	if (gpio_is_valid(pwm_fan_gpio))
+		gpio_free(pwm_fan_gpio);
 gpio_request_fail:
 	if (err == -ENXIO)
 		pr_err("FAN: of_property_read failed\n");
@@ -1531,6 +1540,7 @@ static int pwm_fan_resume(struct platform_device *pdev)
 
 
 static const struct of_device_id of_pwm_fan_match[] = {
+	{ .compatible = "nvidia,tegra186-pwm-fan", },
 	{ .compatible = "loki-pwm-fan", },
 	{ .compatible = "ers-pwm-fan", },
 	{ .compatible = "foster-pwm-fan", },

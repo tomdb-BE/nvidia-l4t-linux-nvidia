@@ -20,6 +20,7 @@
 #include <linux/err.h>
 #include <linux/debugfs.h>
 #include <linux/of.h>
+#include <linux/of_platform.h>
 #include <linux/list.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
@@ -67,8 +68,15 @@ struct tegra_throt_cdev_clk {
 	unsigned long cdev_throt_rate;
 };
 
-static struct pm_qos_request tegra_throt_gpu_req;
-static int tegra_throt_cpu_req;
+struct tegra_throt_cpu_qos_req {
+	struct freq_qos_request req;
+	bool active;
+};
+
+static DEFINE_PER_CPU(struct tegra_throt_cpu_qos_req, tegra_throt_cpu_qos);
+static struct dev_pm_qos_request tegra_throt_gpu_req;
+static struct platform_device *tegra_throt_gpu_pdev;
+static bool tegra_throt_gpu_qos_active;
 static LIST_HEAD(tegra_throt_cdev_list);
 static DEFINE_MUTEX(tegra_throt_lock);
 static struct dentry *tegra_throt_root;
@@ -119,23 +127,115 @@ static unsigned long tegra_throt_calc_rate(unsigned long idx,
 	return throt_rate;
 }
 
-static int tegra_throt_cpufreq_notifier(struct notifier_block *nb,
-					unsigned long event, void *data)
+static void tegra_throt_cpu_qos_remove(void)
 {
-	struct cpufreq_policy *policy = data;
+	int cpu;
 
-	if (event != CPUFREQ_ADJUST)
-		return 0;
+	for_each_possible_cpu(cpu) {
+		struct tegra_throt_cpu_qos_req *qreq =
+			&per_cpu(tegra_throt_cpu_qos, cpu);
 
-	if (policy->max > tegra_throt_cpu_req)
-		cpufreq_verify_within_limits(policy, 0, tegra_throt_cpu_req);
+		if (!qreq->active)
+			continue;
 
+		freq_qos_remove_request(&qreq->req);
+		qreq->active = false;
+	}
+}
+
+static int tegra_throt_cpu_qos_update(unsigned long rate_khz)
+{
+	s32 qos_max;
+	int cpu, count = 0;
+
+	if (rate_khz > S32_MAX)
+		qos_max = FREQ_QOS_MAX_DEFAULT_VALUE;
+	else
+		qos_max = rate_khz;
+
+	for_each_present_cpu(cpu) {
+		struct tegra_throt_cpu_qos_req *qreq;
+		struct cpufreq_policy *policy;
+		int ret;
+
+		policy = cpufreq_cpu_get(cpu);
+		if (!policy)
+			continue;
+
+		if (cpu != policy->cpu) {
+			cpufreq_cpu_put(policy);
+			continue;
+		}
+
+		qreq = &per_cpu(tegra_throt_cpu_qos, policy->cpu);
+		if (!qreq->active) {
+			ret = freq_qos_add_request(&policy->constraints, &qreq->req,
+					   FREQ_QOS_MAX,
+					   FREQ_QOS_MAX_DEFAULT_VALUE);
+			if (ret < 0) {
+				cpufreq_cpu_put(policy);
+				return ret;
+			}
+			qreq->active = true;
+		}
+
+		ret = freq_qos_update_request(&qreq->req, qos_max);
+		cpufreq_cpu_put(policy);
+		if (ret < 0)
+			return ret;
+		count++;
+	}
+
+	return count ? 0 : -EPROBE_DEFER;
+}
+
+static int tegra_throt_gpu_qos_init(void)
+{
+	static const char * const gpu_compat[] = {
+		"nvidia,tegra186-gp10b",
+		"nvidia,gv11b",
+		"nvidia,ga10b",
+		"nvidia,gp10b",
+	};
+	struct device_node *np = NULL;
+	int i, ret;
+
+	for (i = 0; i < ARRAY_SIZE(gpu_compat) && !np; i++)
+		np = of_find_compatible_node(NULL, NULL, gpu_compat[i]);
+	if (!np)
+		return -ENODEV;
+
+	tegra_throt_gpu_pdev = of_find_device_by_node(np);
+	of_node_put(np);
+	if (!tegra_throt_gpu_pdev)
+		return -EPROBE_DEFER;
+
+	ret = dev_pm_qos_add_request(&tegra_throt_gpu_pdev->dev,
+				     &tegra_throt_gpu_req,
+				     DEV_PM_QOS_MAX_FREQUENCY,
+				     PM_QOS_MAX_FREQUENCY_DEFAULT_VALUE);
+	if (ret < 0) {
+		put_device(&tegra_throt_gpu_pdev->dev);
+		tegra_throt_gpu_pdev = NULL;
+		return ret;
+	}
+
+	tegra_throt_gpu_qos_active = true;
 	return 0;
 }
 
-static struct notifier_block tegra_throt_cpufreq_nb = {
-	.notifier_call = tegra_throt_cpufreq_notifier,
-};
+static void tegra_throt_gpu_qos_remove(void)
+{
+	if (tegra_throt_gpu_qos_active) {
+		dev_pm_qos_remove_request(&tegra_throt_gpu_req);
+		tegra_throt_gpu_qos_active = false;
+	}
+
+	if (tegra_throt_gpu_pdev) {
+		put_device(&tegra_throt_gpu_pdev->dev);
+		tegra_throt_gpu_pdev = NULL;
+	}
+}
 
 static struct tegra_throt_clk *tegra_throt_find_clk(
 				struct tegra_throt_clk *pclks, int type)
@@ -154,18 +254,23 @@ static struct tegra_throt_clk *tegra_throt_find_clk(
 
 static void tegra_throt_rate_set(int type, unsigned long rate)
 {
-	int cpu;
+	int ret;
 
 	rate /= KHZ_TO_HZ;
 	switch (type) {
 	case TEGRA_THROTTLE_CPU:
-		for_each_present_cpu(cpu) {
-			tegra_throt_cpu_req = rate;
-			cpufreq_update_policy(cpu);
-		}
+		ret = tegra_throt_cpu_qos_update(rate);
+		if (ret)
+			pr_err("tegra_throt: CPU QoS update failed: %d\n", ret);
 		break;
 	case TEGRA_THROTTLE_GPU:
-		pm_qos_update_request(&tegra_throt_gpu_req, rate);
+		if (!tegra_throt_gpu_qos_active)
+			break;
+		if (rate > S32_MAX)
+			rate = PM_QOS_MAX_FREQUENCY_DEFAULT_VALUE;
+		ret = dev_pm_qos_update_request(&tegra_throt_gpu_req, rate);
+		if (ret < 0)
+			pr_err("tegra_throt: GPU QoS update failed: %d\n", ret);
 		break;
 	default:
 		pr_err("tegra_throt: incorrect type: %d\n", type);
@@ -514,17 +619,14 @@ static int tegra_throt_freq_gov_init(int type)
 
 	switch (type) {
 	case TEGRA_THROTTLE_CPU:
-		tegra_throt_cpu_req = UINT_MAX;
-		ret = cpufreq_register_notifier(&tegra_throt_cpufreq_nb,
-					CPUFREQ_POLICY_NOTIFIER);
+		ret = tegra_throt_cpu_qos_update(FREQ_QOS_MAX_DEFAULT_VALUE);
 		if (ret)
-			pr_info("tegra_throt: missing cpufreq: 0x%x\n", ret);
-
+			pr_info("tegra_throt: missing cpufreq QoS: 0x%x\n", ret);
 		break;
 	case TEGRA_THROTTLE_GPU:
-		pm_qos_add_request(&tegra_throt_gpu_req, PM_QOS_GPU_FREQ_MAX,
-				PM_QOS_GPU_FREQ_MAX_DEFAULT_VALUE);
-		ret = 0;
+		ret = tegra_throt_gpu_qos_init();
+		if (ret)
+			pr_info("tegra_throt: missing GPU QoS: 0x%x\n", ret);
 		break;
 	}
 
@@ -625,9 +727,8 @@ static int tegra_throt_remove(struct platform_device *pdev)
 	struct tegra_throt_cdev *pos;
 
 	dev_info(&pdev->dev, "remove\n");
-	cpufreq_unregister_notifier(&tegra_throt_cpufreq_nb,
-					CPUFREQ_POLICY_NOTIFIER);
-	pm_qos_remove_request(&tegra_throt_gpu_req);
+	tegra_throt_cpu_qos_remove();
+	tegra_throt_gpu_qos_remove();
 	tegra_throt_dbgfs_remove(tegra_throt_root);
 	list_for_each_entry(pos, &tegra_throt_cdev_list, cdev_list)
 		thermal_cooling_device_unregister(pos->cdev);
@@ -656,8 +757,11 @@ static int tegra_throt_probe(struct platform_device *pdev)
 		return -EINVAL;
 
 	ret = tegra_throt_clk_init(pdev, pclks);
-	if (ret)
+	if (ret) {
+		tegra_throt_cpu_qos_remove();
+		tegra_throt_gpu_qos_remove();
 		return ret;
+	}
 
 	ret = tegra_throt_cdev_init(pdev, pclks);
 	if (ret)

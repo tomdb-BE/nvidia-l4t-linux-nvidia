@@ -391,9 +391,6 @@ static int tegra_mc_probe(struct platform_device *pdev)
 	struct tegra_mc_data *mc_data;
 	const struct of_device_id *match;
 
-	pr_err("T186DBG: downstream MC probe ENTER dev=%s node=%pOF\\n",
-	       dev_name(&pdev->dev), pdev->dev.of_node);
-
 	if (!pdev->dev.of_node)
 		return -EINVAL;
 
@@ -514,11 +511,7 @@ static int __init tegra_mc_init(void)
 {
 	int ret;
 
-	pr_err("T186DBG: downstream MC driver init/register\\n");
-
 	ret = platform_driver_register(&mc_driver);
-
-	pr_err("T186DBG: downstream MC driver register returned %d\\n", ret);
 
 	if (ret)
 		return ret;

@@ -26,6 +26,7 @@
 #include <linux/thermal.h>
 #include <linux/slab.h>
 #include <linux/of.h>
+#include <linux/of_platform.h>
 #include <linux/module.h>
 #include <linux/pm_qos.h>
 #include <linux/platform_device.h>
@@ -72,7 +73,16 @@ struct balanced_throttle {
 };
 
 static struct tegra_bwmgr_client *emc_throt_handle;
-static struct pm_qos_request gpu_cap;
+struct tegra_cpu_qos_req {
+	struct freq_qos_request req;
+	bool active;
+};
+
+static DEFINE_PER_CPU(struct tegra_cpu_qos_req, cpu_max_qos);
+static struct dev_pm_qos_request gpu_cap;
+static struct platform_device *gpu_pdev;
+static bool gpu_qos_active;
+static bool gpu_cap_present;
 
 #define CAP_TBL_CAP_NAME(index)	(cap_freqs_table[index].cap_name)
 #define CAP_TBL_CAP_CLK(index)	(cap_freqs_table[index].cap_clk)
@@ -104,62 +114,127 @@ tegra_throttle_get_cur_state(struct thermal_cooling_device *cdev,
 	return 0;
 }
 
-static DEFINE_PER_CPU(unsigned long, max_cpu_rate);
-
-/* Apply thermal constraints on all policy updates */
-static int tegra_throttle_policy_notifier(struct notifier_block *nb,
-					unsigned long event, void *data)
+static void tegra_throttle_cpu_qos_remove(void)
 {
-	struct cpufreq_policy *policy = data;
-	unsigned long cpu_max;
+	int cpu;
 
-	if (event != CPUFREQ_ADJUST)
-		return 0;
+	for_each_possible_cpu(cpu) {
+		struct tegra_cpu_qos_req *qreq = &per_cpu(cpu_max_qos, cpu);
 
-	cpu_max = per_cpu(max_cpu_rate, policy->cpu);
+		if (!qreq->active)
+			continue;
 
-	if (policy->max > cpu_max)
-		cpufreq_verify_within_limits(policy, 0, cpu_max);
+		freq_qos_remove_request(&qreq->req);
+		qreq->active = false;
+	}
+}
 
+static int tegra_throttle_gpu_qos_init(void)
+{
+	struct device_node *np;
+	int ret;
+
+	np = of_find_compatible_node(NULL, NULL, "nvidia,tegra186-gp10b");
+	if (!np)
+		np = of_find_compatible_node(NULL, NULL, "nvidia,gp10b");
+	if (!np)
+		return -ENODEV;
+
+	gpu_pdev = of_find_device_by_node(np);
+	of_node_put(np);
+	if (!gpu_pdev)
+		return -EPROBE_DEFER;
+
+	ret = dev_pm_qos_add_request(&gpu_pdev->dev, &gpu_cap,
+				     DEV_PM_QOS_MAX_FREQUENCY,
+				     PM_QOS_MAX_FREQUENCY_DEFAULT_VALUE);
+	if (ret < 0) {
+		put_device(&gpu_pdev->dev);
+		gpu_pdev = NULL;
+		return ret;
+	}
+
+	gpu_qos_active = true;
 	return 0;
 }
 
-static struct notifier_block tegra_throttle_cpufreq_nb = {
-	.notifier_call = tegra_throttle_policy_notifier,
-};
+static void tegra_throttle_gpu_qos_remove(void)
+{
+	if (gpu_qos_active) {
+		dev_pm_qos_remove_request(&gpu_cap);
+		gpu_qos_active = false;
+	}
+
+	if (gpu_pdev) {
+		put_device(&gpu_pdev->dev);
+		gpu_pdev = NULL;
+	}
+}
 
 /* Must be called with the bthrot_list_lock held */
 static void tegra_throttle_update_cpu_cap(enum throttle_type type,
 					unsigned long rate)
 {
 	int cpu;
-	struct cpufreq_policy policy;
-	struct cpuinfo_arm64 *cpuinfo;
-	int mcpu = false;
+	s32 qos_max;
 
 	if (type != THROT_BCPU && type != THROT_MCPU)
 		return;
 
-	/* Hz to Khz for cpufreq */
-	rate = rate / 1000;
+	if (rate == NO_CAP || rate / 1000UL > S32_MAX)
+		qos_max = FREQ_QOS_MAX_DEFAULT_VALUE;
+	else
+		qos_max = rate / 1000UL;
 
 	for_each_present_cpu(cpu) {
-		if (cpufreq_get_policy(&policy, cpu))
+		struct tegra_cpu_qos_req *qreq;
+		struct cpufreq_policy *policy;
+		struct cpuinfo_arm64 *cpuinfo;
+		bool mcpu;
+		int ret;
+
+		policy = cpufreq_cpu_get(cpu);
+		if (!policy)
 			continue;
 
-		cpuinfo = &per_cpu(cpu_data, cpu);
-		if (MIDR_IMPLEMENTOR(cpuinfo->reg_midr) == ARM_CPU_IMP_NVIDIA)
-			mcpu = true;
-
-		if (type == THROT_MCPU && !mcpu)
+		/* One QoS request per cpufreq policy is sufficient. */
+		if (cpu != policy->cpu) {
+			cpufreq_cpu_put(policy);
 			continue;
+		}
 
-		if (type == THROT_BCPU && mcpu)
+		cpuinfo = &per_cpu(cpu_data, policy->cpu);
+		mcpu = MIDR_IMPLEMENTOR(cpuinfo->reg_midr) == ARM_CPU_IMP_NVIDIA;
+
+		if ((type == THROT_MCPU && !mcpu) ||
+		    (type == THROT_BCPU && mcpu)) {
+			cpufreq_cpu_put(policy);
 			continue;
+		}
 
-		per_cpu(max_cpu_rate, cpu) = rate;
-		pr_debug("tegra_throttle: cpu=%d max_rate=%lu\n", cpu, rate);
-		cpufreq_update_policy(cpu);
+		qreq = &per_cpu(cpu_max_qos, policy->cpu);
+		if (!qreq->active) {
+			ret = freq_qos_add_request(&policy->constraints, &qreq->req,
+					   FREQ_QOS_MAX,
+					   FREQ_QOS_MAX_DEFAULT_VALUE);
+			if (ret < 0) {
+				pr_err("tegra_throttle: failed to add CPU%d QoS request: %d\n",
+				       policy->cpu, ret);
+				cpufreq_cpu_put(policy);
+				continue;
+			}
+			qreq->active = true;
+		}
+
+		ret = freq_qos_update_request(&qreq->req, qos_max);
+		if (ret < 0)
+			pr_err("tegra_throttle: failed to cap CPU%d to %d kHz: %d\n",
+			       policy->cpu, qos_max, ret);
+		else
+			pr_debug("tegra_throttle: CPU%d max=%d kHz\n",
+				 policy->cpu, qos_max);
+
+		cpufreq_cpu_put(policy);
 	}
 }
 
@@ -210,10 +285,17 @@ static void tegra_throttle_set_cap_clk(unsigned long cap_rate,
 		}
 		break;
 	case THROT_GPU:
-		if (cap_rate == NO_CAP)
-			cap_rate = PM_QOS_GPU_FREQ_MAX_DEFAULT_VALUE;
-		pm_qos_update_request(&gpu_cap, cap_rate);
-		CAP_TBL_CAP_FREQ(cap_clk_index) = max_rate;
+		if (cap_rate == NO_CAP || cap_rate > S32_MAX)
+			cap_rate = PM_QOS_MAX_FREQUENCY_DEFAULT_VALUE;
+		if (gpu_qos_active) {
+			ret = dev_pm_qos_update_request(&gpu_cap, cap_rate);
+			if (ret < 0) {
+				pr_err("%s: GPU QoS update failed: %d\n",
+				       __func__, ret);
+				break;
+			}
+			CAP_TBL_CAP_FREQ(cap_clk_index) = max_rate;
+		}
 		break;
 	default:
 		break;
@@ -453,8 +535,7 @@ static int parse_throttle_dt_data(struct device *dev)
 			CAP_TBL_CAP_TYPE(i) = THROT_EMC;
 		else if (!strcmp("gpu", CAP_TBL_CAP_NAME(i))) {
 			CAP_TBL_CAP_TYPE(i) = THROT_GPU;
-			pm_qos_add_request(&gpu_cap, PM_QOS_GPU_FREQ_MAX,
-					   PM_QOS_GPU_FREQ_MAX_DEFAULT_VALUE);
+			gpu_cap_present = true;
 		}
 
 		if (CAP_TBL_CAP_TYPE(i) == THROT_DEFAULT) {
@@ -522,32 +603,50 @@ static void balanced_throttle_unregister(void)
 static int tegra_throttle_probe(struct platform_device *pdev)
 {
 	struct balanced_throttle *bthrot;
-	int cpu, ret, num_cdevs = 0;
+	int ret, num_cdevs = 0;
+
+	/*
+	 * BWMGR is initialized separately from this platform driver.  Its API
+	 * returns -EAGAIN when a client registers before bwmgr_init() has run.
+	 * Probe before parsing/allocating the throttle tables so a deferred
+	 * retry starts from a clean state.
+	 */
+	emc_throt_handle = tegra_bwmgr_register(TEGRA_BWMGR_CLIENT_THERMAL_CAP);
+	if (IS_ERR_OR_NULL(emc_throt_handle)) {
+		ret = IS_ERR(emc_throt_handle) ? PTR_ERR(emc_throt_handle) : -ENODEV;
+		emc_throt_handle = NULL;
+
+		if (ret == -EAGAIN)
+			return -EPROBE_DEFER;
+
+		dev_err(&pdev->dev,
+			"No valid bwmgr handle for emc: %d\n", ret);
+	}
 
 	ret = parse_throttle_dt_data(&pdev->dev);
 
 	if (ret) {
 		dev_err(&pdev->dev, "Platform data parse failed.\n");
-		return ret;
+		goto unregister_emc;
 	}
 
-	for_each_possible_cpu(cpu)
-		per_cpu(max_cpu_rate, cpu) = ULONG_MAX;
-
-	cpufreq_register_notifier(&tegra_throttle_cpufreq_nb,
-					CPUFREQ_POLICY_NOTIFIER);
-
-	emc_throt_handle = tegra_bwmgr_register(TEGRA_BWMGR_CLIENT_THERMAL_CAP);
-	if (IS_ERR_OR_NULL(emc_throt_handle))
-		pr_err("%s: No valid bwmgr handle for emc\n", __func__);
+	if (gpu_cap_present) {
+		ret = tegra_throttle_gpu_qos_init();
+		if (ret) {
+			dev_err(&pdev->dev, "GPU QoS init failed: %d\n", ret);
+			goto unregister_emc;
+		}
+	}
 
 	list_for_each_entry(bthrot, &bthrot_list, node) {
 		ret = balanced_throttle_register(bthrot);
 		if (ret) {
 			balanced_throttle_unregister();
+			tegra_throttle_cpu_qos_remove();
+			tegra_throttle_gpu_qos_remove();
 			dev_err(&pdev->dev,
 				"balanced_throttle_register FAILED.\n");
-			return ret;
+			goto unregister_emc;
 		}
 		num_cdevs++;
 	}
@@ -557,18 +656,25 @@ static int tegra_throttle_probe(struct platform_device *pdev)
 	pr_info("%s: probe successful. #cdevs=%d\n", __func__, num_cdevs);
 
 	return 0;
+
+ unregister_emc:
+	if (emc_throt_handle) {
+		tegra_bwmgr_unregister(emc_throt_handle);
+		emc_throt_handle = NULL;
+	}
+
+	return ret;
 }
 
 static int tegra_throttle_remove(struct platform_device *pdev)
 {
-	cpufreq_unregister_notifier(&tegra_throttle_cpufreq_nb,
-					CPUFREQ_POLICY_NOTIFIER);
-
 	mutex_lock(&bthrot_list_lock);
 	balanced_throttle_unregister();
 	mutex_unlock(&bthrot_list_lock);
 
 	tegra_bwmgr_unregister(emc_throt_handle);
+	tegra_throttle_cpu_qos_remove();
+	tegra_throttle_gpu_qos_remove();
 
 	tegra_throttle_exit_debugfs();
 

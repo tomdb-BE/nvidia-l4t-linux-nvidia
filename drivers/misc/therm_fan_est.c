@@ -155,6 +155,16 @@ static void therm_fan_est_work_func(struct work_struct *work)
 		write_unlock(&est->state_lock);
 	}
 
+	/*
+	 * The downstream 4.9 implementation only kicked the thermal core when
+	 * its private trip index changed.  On newer thermal-core code a cooling
+	 * device may be bound after that transition, leaving the freshly bound
+	 * device at state 0 until another trip boundary is crossed.  Refresh the
+	 * zone on every estimator sample so the governor always reconciles the
+	 * cooling-device state with the current estimated temperature.
+	 */
+	thermal_zone_device_update(est->thz, THERMAL_EVENT_UNSPECIFIED);
+
 next_work:
 	est->ntemp++;
 	queue_delayed_work(est->workqueue, &est->therm_fan_est_work,
@@ -183,6 +193,9 @@ static int therm_fan_est_bind(struct thermal_zone_device *thz,
 		for (i = 0; i < MAX_ACTIVE_STATES; i++)
 			thermal_zone_bind_cooling_device(thz, i, cdev, i, i,
 					THERMAL_WEIGHT_DEFAULT);
+
+		/* Re-evaluate immediately when the fan cooling device appears. */
+		thermal_zone_device_update(thz, THERMAL_EVENT_UNSPECIFIED);
 	}
 
 #ifdef CONFIG_THERMAL_GOV_CONTINUOUS
@@ -910,6 +923,20 @@ static int therm_fan_est_probe(struct platform_device *pdev)
 		goto free_tzp;
 	}
 	pr_info("THERMAL EST: thz register success.\n");
+
+	/*
+	 * thermal_zone_device_register() leaves zones disabled on 5.10.
+	 * The downstream driver predates that lifecycle requirement and relies
+	 * on thermal_zone_device_update() to drive the fan governor.  Enable the
+	 * zone explicitly so those updates are not discarded by thermal core.
+	 */
+	err = thermal_zone_device_enable(est_data->thz);
+	if (err) {
+		pr_err("THERMAL EST: failed to enable thermal zone: %d\n", err);
+		thermal_zone_device_unregister(est_data->thz);
+		est_data->thz = NULL;
+		goto free_tzp;
+	}
 
 	/* workqueue related */
 	est_data->workqueue = alloc_workqueue(dev_name(&pdev->dev),

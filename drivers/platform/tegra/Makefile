@@ -19,11 +19,17 @@ obj-$(CONFIG_TEGRA_SOC_HWPM) += tegra_hwpm.o
 else
 obj-$(CONFIG_TEGRA_SOC_HWPM) += hwpm/
 endif
-obj-$(CONFIG_ARCH_TEGRA_18x_SOC) += tegra18_speedo.o
+ifneq ($(filter y,$(CONFIG_ARCH_TEGRA_18x_SOC) $(CONFIG_ARCH_TEGRA_186_SOC)),)
+obj-y += tegra18_speedo.o
+endif
 obj-$(CONFIG_TEGRA_DC) += panel-simulator.o
-obj-$(CONFIG_ARCH_TEGRA_18x_SOC) += tegra-roc.o
+ifneq ($(filter y,$(CONFIG_ARCH_TEGRA_18x_SOC) $(CONFIG_ARCH_TEGRA_186_SOC)),)
+obj-y += tegra-roc.o
+endif
 obj-$(CONFIG_TEGRA_PMC_AO_WAKE) += tegra186-aowake.o
-obj-$(CONFIG_ARCH_TEGRA_18x_SOC) += tegra186-system-config.o
+ifneq ($(filter y,$(CONFIG_ARCH_TEGRA_18x_SOC) $(CONFIG_ARCH_TEGRA_186_SOC)),)
+obj-y += tegra186-system-config.o
+endif
 obj-$(CONFIG_TEGRA_CAMERA_RTCPU) += tegra-camera-rtcpu.o
 obj-$(CONFIG_TEGRA_CAMERA_RTCPU) += rtcpu/
 obj-$(CONFIG_TEGRA_PM_IRQ) += pm-irq-t18x.o

@@ -352,6 +352,31 @@ static const struct attribute_group oc6_data = {
 	NULL,
 };
 
+static const struct attribute_group *t186_oc_groups[] = {
+	&oc1_data,
+	&oc2_data,
+	&oc3_data,
+	&oc4_data,
+	&oc5_data,
+	&oc6_data,
+	NULL,
+};
+
+static const struct oc_soc_data t186_oc_soc_data = {
+	.n_ocs = 6,
+	.n_throt_vecs = 8,
+	.cpu_offset = 0x30,
+	.gpu_offset = 0x38,
+	.priority_offset = 0x44,
+	.throttle_bank_size = 0x30,
+	.throttle_ctrl_base = 0x400,
+	.oc1_stats_offset = 0x3a8,
+	.stats_bank_size = 0x4,
+	.oc1_thresh_cnt_offset = 0x314,
+	.thresh_cnt_bank_size = 0x14,
+	.attr_groups = t186_oc_groups,
+};
+
 static const struct attribute_group *t194_oc_groups[] = {
 	&oc1_data,
 	&oc2_data,
@@ -380,6 +405,9 @@ static const struct oc_soc_data t194_oc_soc_data = {
 static const struct of_device_id tegra_oc_event_of_match[] = {
 	{ .compatible = "nvidia,tegra194-oc-event",
 		.data = (void *)&t194_oc_soc_data
+	},
+	{ .compatible = "nvidia,tegra186-oc-event",
+		.data = (void *)&t186_oc_soc_data
 	},
 	{}
 };
@@ -412,14 +440,17 @@ static int tegra_oc_event_probe(struct platform_device *pdev)
 	if (!match)
 		return -ENODEV;
 
-	blf = devm_ioremap(&pdev->dev,
-			   BPMP_NOC_SOC_THERM_BLF_CONTROL_REGISTER_0,
-			   sizeof(u32));
-	if (blf == NULL)
-		return -ENOMEM;
+	/* The BLF CPU-access check exists on Tegra194, not Tegra186. */
+	if (tegra_get_chip_id() == TEGRA194) {
+		blf = devm_ioremap(&pdev->dev,
+				   BPMP_NOC_SOC_THERM_BLF_CONTROL_REGISTER_0,
+				   sizeof(u32));
+		if (blf == NULL)
+			return -ENOMEM;
 
-	if (!((readl(blf) & CPU_ACCESS_MASK) >> 1))
-		return -EPERM;
+		if (!((readl(blf) & CPU_ACCESS_MASK) >> 1))
+			return -EPERM;
+	}
 
 	memcpy(&tegra_oc.soc_data, match->data, sizeof(struct oc_soc_data));
 	if (tegra_platform_is_silicon()) {
