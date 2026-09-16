@@ -37,6 +37,7 @@ config TEGRA_THERMAL_THROTTLE
        bool "Enable throttling of CPU speed on overtemp"
        depends on CPU_FREQ
        depends on THERMAL
+	default y if ARCH_TEGRA_186_SOC
        help
          Passive cooling device that throttles clocks using cpufreq and pmqos
 	 interfaces.

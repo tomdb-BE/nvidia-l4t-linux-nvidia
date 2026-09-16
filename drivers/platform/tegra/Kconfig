@@ -1,5 +1,6 @@
 config DENVER_CPU
 	bool "Denver CPU"
+	default y if ARCH_TEGRA_186_SOC
 	help
 	  Support for NVIDIA Denver CPU
 
@@ -44,6 +45,7 @@ config TEGRA_18X_SERROR
 	select TEGRA_ARI_MCA
 	select TEGRA_BRIDGE_MCA
 	select TEGRA_A57_SERR
+	default y if ARCH_TEGRA_18x_SOC || ARCH_TEGRA_186_SOC
         help
           The Tegra18 SError handler. This handles Denver SErrors, A57 SErrors,
 	  CCPLEX errors, and fabric slave errors.
